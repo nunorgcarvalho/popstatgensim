@@ -180,8 +180,7 @@ def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: li
     Returns:
         random_effects (dict): Dictionary of relevant pieces of random effects, where each value in the dictionary is a list of the same length as the number of random effects.
     '''
-    # number of components
-    M = len(As)
+    M = len(As) # number of components
     # names components if not given
     if names is None:
         names = [f"RE_{i}" for i in range(M)]
@@ -303,20 +302,6 @@ def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: li
         C_cal = C_cal[np.ix_(i_random, i_random)]
         # Project to the nearest valid correlation matrix (symmetric, PSD, diag=1)
         C_cal = nearest_correlation_matrix(C_cal, eps_eig=1e-12)
-
-        # # Calculates L for the random effects only
-        # Res = C_cal - R @ R.T
-        # # ensures Res is PSD
-        # # row-wise remaining variance (must be >= 0); s_j^2 = diag(Res)
-        # s = np.sqrt(np.clip(1.0 - np.sum(R**2, axis=1), 0.0, None))
-        # # Normalize to a correlation-like matrix and project to PSD
-        # with np.errstate(divide='ignore', invalid='ignore'):
-        #     Dinv = np.diag(np.where(s > 0, 1.0/s, 0.0))
-        # Q = Dinv @ Res @ Dinv
-        # Q = nearest_correlation_matrix(Q, eps_eig=1e-12)
-        # # Put the scale back and factor
-        # Res_psd = np.diag(s) @ Q @ np.diag(s)
-        # L_random = np.linalg.cholesky(0.5*(Res_psd + Res_psd.T) + 1e-12*np.eye(len(i_random)))
 
         # Build Z_f (N x k) and its Gram G_f (k x k)
         Z_f = np.column_stack([Z_latent[:, i] for i in i_fixed]) if i_fixed else np.zeros((N,0))
