@@ -1,0 +1,3 @@
+.vscode
+tests/testing*.ipynb
+tests/private/*
