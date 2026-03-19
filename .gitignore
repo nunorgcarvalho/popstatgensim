@@ -1,3 +1,5 @@
 .vscode
 tests/testing*.ipynb
 tests/private/*
+__pycache__/
+*.py[cod]
