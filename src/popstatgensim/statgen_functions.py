@@ -20,7 +20,7 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
     Parameters:
         M (int): Total number of variants (causal and non-causal).
         M_causal (int): Number of causal variants (variants with non-zero effect sizes). Default is all variants.
-        var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Default is 1.0.
+        var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Refers to direct genetic effects. Default is 1.0.
         dist (str): Distribution to draw causal effects from. Options are:
             - 'normal': Normal distribution (default).
             - 'constant': All effect sizes are the same.
@@ -65,7 +65,7 @@ def generate_noise_value(N: int, var_Eps: float = 0.0) -> np.ndarray:
     y_Eps = np.random.normal(loc=0, scale=np.sqrt(var_Eps), size = N)
     return y_Eps
 
-def get_G_std_for_effects(G: np.ndarray, p_min: float = 0.05, P: int = None, ) -> np.ndarray:
+def get_G_std_for_effects(G: np.ndarray, p_min: float = 0.05, P: int = None ) -> np.ndarray:
     '''
     Computes the standard deviation of each column in the genotype matrix used for converting between per-allele and per-standardized-allele effects. Has safe handling for monomorphic alleles.
     Parameters:

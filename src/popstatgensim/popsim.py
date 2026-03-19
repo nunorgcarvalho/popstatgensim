@@ -263,7 +263,7 @@ class Population:
 
     def add_trait(self, name: str, seed: int = None, **kwargs):
         '''
-        Initializes and generates trait.
+        Initializes and generates trait. See Trait.__init__ for details. If var_Gpar is specified and non-zero, Gpar is automatically extracted from the population object and passed to the Trait constructor.
         Parameters:
             name (str): Name of trait.
             seed (int): Seed for random number generation.
@@ -271,10 +271,11 @@ class Population:
         '''
         if seed is not None:
             np.random.seed(seed)
+
+        # if the trait contains indirect genetic effects, then Gpar needs to be passed
+        if 'var_Gpar' in kwargs and kwargs['var_Gpar'] != 0:
+            kwargs['Gpar'] = self.get_Gpar()
         self.traits[name] = Trait(self.G, **kwargs)
-        # stores actual heritability value
-        self.traits[name].h2_true = self.traits[name].get_h2_true()
-        self.traits[name].h2_trues = np.expand_dims(self.traits[name].h2_true, axis=0)
     
     def add_trait_from_effects(self, name: str, **kwargs):
         '''
@@ -284,9 +285,6 @@ class Population:
             **kwargs: All other arguments are passed to the Trait.from_effects() constructor.
         '''
         self.traits[name] = Trait.from_effects(self.G, **kwargs)
-        # stores actual heritability value
-        self.traits[name].h2_true = self.traits[name].get_h2_true()
-        self.traits[name].h2_trues = np.expand_dims(self.traits[name].h2_true, axis=0)
     
     def add_trait_from_fixed_values(self, name: str, y: np.ndarray):
         '''
@@ -313,8 +311,13 @@ class Population:
                 continue
             trait = self.traits[key]
             if trait.type == 'composite':
+                # checks if trait has a Gpar component
+                if 'Gpar' in trait.y_:
+                    Gpar = self.get_Gpar()
+                else:
+                    Gpar = None
                 # trait object already contains allelic effects, which are applied to new genotypes
-                trait.generate_trait(self.G, fixed_h2=fixed_h2)
+                trait.generate_trait(self.G, fixed_h2=fixed_h2, Gpar=Gpar)
             elif key == 'sex':
                 self.assign_sex()
 
@@ -568,6 +571,28 @@ class Population:
             return np.nan
 
         return core.corr(spouse_values_1, spouse_values_2)
+
+    def get_Gpar(self) -> np.ndarray:
+        '''
+        Returns an N*M matrix whose (i, j) entry is the *sum* of genotype at variant j
+        across individual i's two parents from the previous generation.
+        '''
+        if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
+            raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
+        if 'parents' not in self.relations:
+            raise Exception("Parent relationship matrix not found in object. Make sure `relations['parents']` exists.")
+
+        parents = self.relations['parents']
+        G_prev = self.past[1].G
+
+        if parents.shape != (self.N, self.past[1].N):
+            raise Exception('Parent relationship matrix has incompatible shape for previous generation.')
+
+        parent_counts = parents.sum(axis=1)
+        if not np.all(parent_counts == 2):
+            raise Exception('Each individual must have exactly two recorded parents to compute `Gpar`.')
+
+        return (parents @ G_prev)
 
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
                            mu: Union[float, np.ndarray] = 0,
@@ -925,28 +950,63 @@ class Trait:
     Class for a trait belonging to a Population object.
     '''
     def __init__(self, G: np.ndarray, M_causal: int = None, dist: str = 'normal',
-                 var_G: float = 1.0, var_Eps: float = 0.0,
+                 var_G: float = 1.0, var_Eps: float = 0.0, var_Gpar: float = 0.0, Gpar: np.ndarray = None,
                  random_effects: dict = None):
         '''
-        Initializes and generates trait based on variance components.
+        Initializes and generates trait based on variance components. Genetic variance is split across causal variants according to specified distribution. For simplicity, if indirect genetic effects are included (IGEs, from var_Gpar), they are are perfectly correlated with direct genetic effects (DGEs, from var_G), but scaled by a constant according to the variance component values. Note: standardized IGEs are scaled by the allele frequency of the parent population.
         Parameters:
             G (2D array): N*M NON-standardized genotype matrix.
             M_causal (int): Number of causal variants (variants with non-zero effect sizes). Default is all variants.
-            dist (str): Distribution to draw causal effects from. Options are:
+            dist (str): Distribution to draw causal effects from. Applied to all genetic components. Options are:
             - 'normal': Normal distribution (default).
             - 'constant': All effect sizes are the same.
-            var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Default is 1.0.
+            var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Refers to direct genetic effects. Default is 1.0.
             var_Eps (float): Total expected variance contributed by random noise.
+            var_Gpar (float): Total expected variance contributed by the sum (mom + dad) of parental genetic effects. Refers to indirect genetic effects. Default is 0.0, meaning no parental effects are added.
+            Gpar (2D array): N*M matrix of summed parental genotypes. Default is None, meaning no parental effects are added.
             random_effects (dict): Dictionary of random effects to add to the trait. See `stat.get_random_effects()` for details. Default is None, meaning no random effects are added.
         '''
+        # sets variance components as whatever the user inputted
+        self.set_vars(var_G=var_G, var_Eps=var_Eps, var_Gpar=var_Gpar, random_effects=random_effects, initial=True)
+
         # generates causal effects
         effects, _ = stat.generate_causal_effects(G.shape[1], M_causal, var_G, dist)
-        self._initialize_effects(G, effects, var_Eps)
+        self._initialize_effects(G, effects, var_Eps, var_Gpar, Gpar)
         # computes trait
-        self.generate_trait(G, random_effects=random_effects)
+        self.generate_trait(G, Gpar=Gpar, random_effects=random_effects)
+
+    def set_vars(self, var_G: float = None, var_Eps: float = None, var_Gpar: float = None, random_effects: dict = None, initial: bool = False):
+        '''
+        Sets the variance components for the trait. Generally, this is just defined as the variance of that component across the population, but when initially constructing the trait, can instead be a user-inputted value.
+        Parameters:
+            var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Refers to direct genetic effects. If None, doesn't update it. Default is None.
+            var_Eps (float): Total expected variance contributed by random noise. If None, doesn't update it. Default is None.
+            var_Gpar (float): Total expected variance contributed by the sum (mom + dad) of parental genetic effects. Refers to indirect genetic effects. If None, doesn't update it. Default is None.
+            random_effects (dict): Dictionary of random effects to add to the trait. See `stat.get_random_effects()` for details.  If None, doesn't update it. Default is None.
+            initial (bool): If True, then also saves a 'var_initial' dictionary with the current values. Used when initially constructing trait.
+        '''
+        # creates var attribute if it doesn't exist
+        if not hasattr(self, 'var') or self.var is None:
+            self.var = {}
+        # saves non-RE components
+        if var_G is not None:
+            self.var['G'] = var_G
+        if var_Eps is not None:
+            self.var['Eps'] = var_Eps
+        if var_Gpar is not None:
+            self.var['Gpar'] = var_Gpar
+        # saves random effects variances 
+        if random_effects is not None:
+            names = random_effects['name']
+            variances = random_effects['var']
+            for name, var in zip(names, variances):
+                self.var[name] = var
+
+        if initial:
+            self.var_initial = self.var.copy()
 
     @classmethod
-    def from_effects(cls, G: np.ndarray, effects: np.ndarray, per_allele: bool = False, var_Eps: float = 0.0,
+    def from_effects(cls, G: np.ndarray, effects: np.ndarray, per_allele: bool = False, var_Eps: float = 0.0, var_Gpar: float = 0.0, Gpar: np.ndarray = None,
                  random_effects: dict = None) -> 'Trait':
         '''
         Initializes a trait from a given genotype matrix and genetic effects array.
@@ -955,11 +1015,15 @@ class Trait:
             effects (1D array): M-length array of STANDARDIZED effects. Set non-causal effects to 0.
             per_allele (bool): Whether the effects are per-allele. Default is False.
             var_Eps (float): Total expected variance contributed by random noise. Default is 0.0.
+            var_Gpar (float): Total expected variance contributed by the sum (mom + dad) of parental genetic effects. Default is 0.0.
+            Gpar (2D array): N*M matrix of summed parental genotypes. Default is None.
             random_effects (dict): Dictionary of random effects to add to the trait. See `stat.get_random_effects()` for details. Default is None, meaning no random effects are added.
         Returns:
             Trait: A new Trait object initialized with the given genotype matrix and effects.
         '''
         trait = cls.__new__(cls)
+
+        trait.set_vars(var_G=None, var_Eps=var_Eps, var_Gpar=var_Gpar, random_effects=random_effects, initial=True)
         # initializes the object with the given haplotype array
         if effects.shape[0] != G.shape[1]:
             raise ValueError("Length of effects must match number of variants in G.")
@@ -967,8 +1031,8 @@ class Trait:
         if per_allele:
             G_std = stat.get_G_std_for_effects(G)
             effects = stat.get_standardized_effects(effects, G_std, std2allelic=False)
-        trait._initialize_effects(G, effects, var_Eps)
-        trait.generate_trait(G, fixed_h2=False, random_effects=random_effects)
+        trait._initialize_effects(G, effects, var_Eps, var_Gpar, Gpar)
+        trait.generate_trait(G, Gpar=Gpar, fixed_h2=False, random_effects=random_effects)
         return trait
 
     @classmethod
@@ -983,7 +1047,7 @@ class Trait:
         trait.type = 'fixed'
         return trait
     
-    def _initialize_effects(self, G: np.ndarray, effects: np.ndarray, var_Eps: float = 0.0):
+    def _initialize_effects(self, G: np.ndarray, effects: np.ndarray, var_Eps: float = 0.0, var_Gpar: float = 0.0, Gpar: np.ndarray = None):
         '''
         Initializes the trait's genetic effects and variance components. See `from_effects` class method for details.
         '''
@@ -991,27 +1055,45 @@ class Trait:
         self.effects = effects
         G_std = stat.get_G_std_for_effects(G)
         self.effects_per_allele = stat.get_standardized_effects(self.effects, G_std, std2allelic=True)
+        var_G = self.effects.var() * G.shape[1]  # assumes independence!
+        
+        # if Gpar is given, then IGEs are also computed
+        # see Supplemental Note 1.1 of [Young et al. 2018 NatGen] for how IGEs are computed based on DGEs. Using notation from the paper, `var_Gpar` = eta^2
+        # Note! Because G and Gpar are always correlated, this means the variance of the total genetic component will always be higher than var_G + var_Gpar (if var_Gpar>0)
+        if Gpar is not None:
+            effects_Gpar = self.effects * np.sqrt(var_Gpar / var_G)
+            self.effects_Gpar = effects_Gpar
+            Gpar_std = stat.get_G_std_for_effects(Gpar, P=G.max())
+            self.effects_Gpar_per_allele = stat.get_standardized_effects(self.effects_Gpar, Gpar_std, std2allelic=True)
+
         self.j_causal = np.where(self.effects != 0)[0]  # indices of causal variants
         self.M_causal = len(self.j_causal)
-        # variance components
-        self.var = {}
-        self.var['Eps'] = var_Eps
-        self.var['G'] = self.effects.var() * G.shape[1]  # assumes independence!
-        self.h2 = self.get_h2_var()
 
-    def generate_trait(self, G: np.ndarray, random_effects: dict = None, fixed_h2: bool = False):
+    def generate_trait(self, G: np.ndarray, Gpar: np.ndarray = None, random_effects: dict = None, fixed_h2: bool = False):
         '''
         Generates/updates trait using stored genetic effects and recomputing other components. Automatically updates object's attributes, instead of returning trait values.
         Parameters:
             G (2D array): N*M NON-standardized genotype matrix.
+            Gpar (2D array): N*M matrix of summed parental genotypes. Default is None.
             random_effects (dict): Dictionary of random effects to add to the trait. See `stat.get_random_effects()` for details. Default is None, meaning no random effects are added.
             fixed_h2 (bool): Whether the variance of the noise component should be updated to maintain the heritability. Genetic component must be non-zero. Default is False.
         '''
         N = G.shape[0]
         # makes empty dictionary for trait components
         self.y_ = {}
-        # genetic component (using per-allele effects)
+
+        # the direct vs indirect trait architecture below reflects the Supplemental Note 1.1 of [Young et al. 2018 NatGen]
+
+        # (direct) genetic component (using per-allele effects)
         self.y_['G'] = stat.compute_genetic_value(G, self.effects_per_allele)
+        # var_G is updated to be the actual variance of the direct genetic component
+        self.set_vars(var_G=self.y_['G'].var())
+        
+        # computes parental genetic component
+        if Gpar is not None:
+            self.y_['Gpar'] = stat.compute_genetic_value(Gpar, self.effects_Gpar_per_allele)
+            # var_Gpar is updated to be the actual variance of the parental genetic component
+            self.set_vars(var_Gpar=self.y_['Gpar'].var())
 
         # random effects components
         if random_effects is not None:
@@ -1019,15 +1101,20 @@ class Trait:
                 Zu = random_effects['Z'][i] @ random_effects['u'][i]
                 self.y_[random_effects['name'][i]] = Zu
 
-        var_Eps = self.var['Eps']
+        var_Eps = self.var['Eps'] # should already exist
         # computes non-noise component of trait by adding up all 'y_' components except for 'Eps'
         y_nonEps = np.sum([self.y_[key] for key in self.y_.keys() if key != 'Eps'], axis=0)
         # recomputes non-noise component to get needed var_Eps to maintain heritability
         if fixed_h2:
-            var_Eps = (y_nonEps.var() / self.h2) - y_nonEps.var()
+            # h2 is estimated as var_G / (sum of vars, including intended Eps)
+            # where the vars come from self.var dictionary
+            h2 = self.var['G'] / np.sum(self.var.values())
+            var_Eps = (y_nonEps.var() / h2) - y_nonEps.var()
 
         # random noise component
         self.y_['Eps'] = stat.generate_noise_value(N,var_Eps)
+        # updates self.var['Eps']
+        self.set_vars(var_Eps=self.y_['Eps'].var())
 
         # computes actual trait as additive of individual components
         self.y = y_nonEps + self.y_['Eps']
@@ -1035,23 +1122,52 @@ class Trait:
         # sets trait type has being a composite of multiple components
         self.type = 'composite'
 
-    def get_h2_true(self) -> float:
+    def get_h2(self, method: str = 'additive_covariance', force_independence: bool = False) -> float:
         '''
-        Returns the true narrow-sense heritability of the trait, which is variance of the genetic component divided by the variance of the trait.
+        Returns heritability under one of several definitions.
+
+        Parameters:
+            method (str): Method used to compute heritability. Options are:
+            - 'additive_covariance' (default): Uses Cov(Y, G)^2 / Var(G), where G is the additive indirect genetic component (`Trait.y_['G']`) and Y is the trait (`Trait.y`). This definition includes the covariance between the direct component and other trait components (e.g. parental effects, correlated environment) as well as non-independence between causal variants. I.e., it does not assume independence between components nor variants.
+            - 'additive_variance': Uses Var(G) / Var(Y). This definition does not include the covariance between different components, but does include non-independence between causal variants. I.e., it assumes independence between components, but not between variants.
+            - 'additive_effects': Uses `np.sum(self.effects**2)`. This definition assumes independence between components and between variants.
+            force_independence (bool): For all methods, the computed genetic variance component is by default divided by the true variance of the trait, which will be affected by the covariance between trait components. Setting this to true sets the trait variance to the sum of the variance of the trait components, which implicitly assumes the covariance between components is 0. This is not recommended for the 'additive_covariance' method, but can be reasonable for the 'additive_variance' and 'additive_effects' methods.
+
         Returns:
-            h2_true (float): True heritability of the trait.
+            h2 (float): Heritability under the requested definition.
         '''
-        h2_true = self.y_['G'].var() / self.y.var()
-        return h2_true
-    
-    def get_h2_var(self) -> float:
-        '''
-        Returns the expected heritability based on the variance components of the trait. This is computed as the variance of the genetic component divided by the sum of variance components. This is likely to not be accurate if trait components are not independent. For a more accurate estimate, use `get_h2_true()`.
-        Returns:
-            h2 (float): Heritability of the trait.
-        '''
-        h2 = self.var['G'] / np.sum(list(self.var.values()))
-        return h2
+        # genetic variance (var_g)
+        if method == 'additive_covariance':
+            if not hasattr(self, 'y') or not hasattr(self, 'y_') or 'G' not in self.y_:
+                raise Exception("Trait must have `y` and `y_['G']` to compute heritability with method='additive_covariance'.")
+            var_G = self.y_['G'].var()
+            if var_G == 0:
+                return np.nan
+            cov_YG = np.mean((self.y - self.y.mean()) * (self.y_['G'] - self.y_['G'].mean()))
+            var_g = cov_YG**2 / var_G
+
+        elif method == 'additive_variance':
+            if not hasattr(self, 'y') or not hasattr(self, 'y_') or 'G' not in self.y_:
+                raise Exception("Trait must have `y` and `y_['G']` to compute heritability with method='additive_variance'.")
+            
+            var_g = self.y_['G'].var()
+
+        elif method == 'additive_effects':
+            if not hasattr(self, 'effects'):
+                raise Exception("Trait must have `effects` to compute heritability with method='additive_effects'.")
+            var_g = np.sum(self.effects**2)
+        else:
+            raise ValueError(f"Unknown heritability method: {method}")
+        
+        # phenotypic variance (var_y)
+        if force_independence: # assumes zero covariance between components
+            var_y = np.sum([comp.var() for comp in self.y_.values()])
+        else: # true phenotypic variance
+            var_y = self.y.var()
+        if var_y == 0:
+            return np.nan
+
+        return var_g / var_y
     
     def get_components_matrix(self, exclude = None, include_y = True) -> np.ndarray:
         '''
@@ -1101,7 +1217,7 @@ class Trait:
                 trait_new.y_[component] = np.concatenate([trait.y_[component] for trait in traits])
             # updates variance components
             trait_new.var['Eps'] = trait_new.y_['Eps'].var()
-            trait_new.h2 = trait_new.get_h2_var()
+            trait_new.h2 = trait_new.var['G'] / np.sum(list(trait_new.var.values()))
 
         return trait_new
 
@@ -1129,7 +1245,7 @@ class Trait:
             trait_new.y_[component] = self.y_[component][i_keep]
         # updates variance components
         trait_new.var['Eps'] = trait_new.y_['Eps'].var()
-        trait_new.h2 = trait_new.get_h2_var()
+        trait_new.h2 = trait_new.var['G'] / np.sum(list(trait_new.var.values()))
 
         return trait_new
         
