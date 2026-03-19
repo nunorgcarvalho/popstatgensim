@@ -535,6 +535,40 @@ class Population:
 
         return ((iMs, iPs), rel_spouses)
 
+    def get_spouse_corr(self, trait: str, type: str = 'phenotypic') -> float:
+        '''
+        Computes the correlation between spouses for the specified trait. Only works if spouses relationship matrix is stored in the object (i.e. if `_pair_mates()` has been called at least once).
+        Parameters:
+            trait (str): The name of the trait for which to compute spouse correlation.
+            type (str): he type of trait values to use. If 'phenotypic', uses the phenotypic values. If 'genetic', uses the genetic values. Default is 'phenotypic'.
+        Returns:
+            float: Correlation between spouses for the specified trait.
+        '''
+        if 'spouses' not in self.relations:
+            raise Exception('Spouse relationship matrix not found in object. Make sure to call `_pair_mates()` at least once to generate spouse relationships.')
+        if trait not in self.traits:
+            raise Exception(f'Trait {trait} not found in population traits.')
+        if type == 'phenotypic':
+            AM_values = self.traits[trait].y
+        elif type == 'genetic':
+            AM_values = self.traits[trait].y_['G']
+        else:
+            raise Exception(f'Unknown type: {type}. Must be "phenotypic" or "genetic".')
+        
+        spouses = self.relations['spouses'].astype(bool)
+        i_spouse, j_spouse = np.where(np.triu(spouses, k=1))
+
+        if len(i_spouse) == 0:
+            raise Exception('No spouse pairs found in spouse relationship matrix.')
+
+        spouse_values_1 = AM_values[i_spouse]
+        spouse_values_2 = AM_values[j_spouse]
+
+        if spouse_values_1.std() == 0 or spouse_values_2.std() == 0:
+            return np.nan
+
+        return core.corr(spouse_values_1, spouse_values_2)
+
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
                            mu: Union[float, np.ndarray] = 0,
                            **kwargs) -> np.ndarray:
@@ -554,7 +588,7 @@ class Population:
 
         # Assortative Mating ####        
         # pairs up mates
-        (iMs, iPs), rel_spouses = self._pair_mates()
+        (iMs, iPs), rel_spouses = self._pair_mates(**kwargs)
 
         # Selection ####
         if isinstance(s, (float, int)):
