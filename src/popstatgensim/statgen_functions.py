@@ -478,7 +478,7 @@ def plot_HE_regression(A: np.ndarray, y: np.ndarray, bins: int = 5) -> None:
 
 #### REstricted Maximum Likelihood (REML) Methods ####
 
-def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None], X: np.ndarray = None, init: list[float] = None,
+def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = None, X: np.ndarray = None, init: list[float] = None,
              method: str = 'EM', tol: float = 1e-5, max_iter: int = 1000,
              force_non_neg: bool = False, std_y: bool = False, verbose: int = 2) -> Tuple[np.ndarray, np.ndarray, float]:
     '''
@@ -486,7 +486,7 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
     Parameters:
         y (1D array): N-length array of trait values.
         Bs (list of 2D arrays): List containing M random effects covariance matrices that are N_i*N_i. Don't include residual matrix.
-        Zs (list of 2D arrays): List containing M random effects design matrices that are N*N_i. Don't include residual matrix. If an element is None, it assumes the identity matrix, but requires the the corresponding B matrix to be N*N.
+        Zs (list of 2D arrays): List containing M random effects design matrices that are N*N_i. Don't include residual matrix. If an element is None, it assumes the identity matrix, but requires the the corresponding B matrix to be N*N. If Zs itself is None, it takes it to mean all identity matrices of size N*N.
         X (2D array): N*K design matrix of fixed effects covariates. If None, doesn't incorporate fixed effects.
         init (list): M-length list with initial guess for the variance components. Default is random initialization.
         method (str): Method to use for REML estimation. Options are:
@@ -514,6 +514,8 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
     if std_y:
         y = y / y.std()  # standardizes y to have variance 1
 
+    if Zs is None:
+        Zs = [None] * len(Bs) # if Zs is None, assumes all identity matrices of size N*N
     # adds residual matrix to Zs and Bs and initial guess
     Zs.append(np.identity(N))  # residual design matrix (identity)
     Bs.append(np.identity(N)) # residual covariance matrix (identity)
@@ -547,7 +549,8 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
     else:
         raise ValueError(f"Method '{method}' is not implemented. See documentation.")
 
-    print('Now computing standard errors and log-likelihood with final variance component estimates...')
+    if verbose > 0:
+        print('Now computing standard errors and log-likelihood with final variance component estimates...')
     # final V matrix after convergence
     (V, V_inv) = _get_V_components(Vs_i, vars_i)  # computes V, and V_inv
 
