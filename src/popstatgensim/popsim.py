@@ -261,6 +261,36 @@ class Population:
         '''
         self.GRM = pop.compute_GRM(self.X)
 
+    def get_RDR_SNP_GRMs(self) -> list:
+        '''
+        Constructs the three SNP-based GRMs used for Related Disequilibrium Regression (RDR). This could be done more efficiently by reusing intermediate calculations, but is currently implemented in a straightforward way for clarity.\
+
+        Returns:
+            list: `[R_oo, R_pp, R_op]`, where:
+            - `R_oo = X_o X_o^T / M`
+            - `R_pp = X_par X_par^T / (2M)`
+            - `R_op = (X_o X_par^T + X_par X_o^T) / (2M)`
+
+        Notes:
+            - `X_o` is the standardized offspring genotype matrix with column mean 0 and variance 1.
+            - `G_par` is the sum of maternal and paternal genotypes for each individual.
+            - `X_par` is the standardized version of `G_par` with column mean 0 and variance 2.
+        '''
+        G_o = self.G
+        X_o = pop.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
+
+        G_par = self.get_Gpar()
+        p_par = G_par.mean(axis=0) / (2 * self.P)
+        X_par = pop.standardize_G(G_par, p_par, 2 * self.P, impute=True,
+                                  std_method='observed', target_var=2.0)
+
+        M = G_o.shape[1]
+        R_oo = pop.compute_GRM(X_o)
+        R_pp = pop.compute_GRM(X_par) / 2
+        R_op = (X_o @ X_par.T + X_par @ X_o.T) / (2 * M)
+
+        return [R_oo, R_pp, R_op]
+
     def add_trait(self, name: str, seed: int = None, **kwargs):
         '''
         Initializes and generates trait. See Trait.__init__ for details. If var_Gpar is specified and non-zero, Gpar is automatically extracted from the population object and passed to the Trait constructor.

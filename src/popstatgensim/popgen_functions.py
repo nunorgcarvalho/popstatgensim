@@ -50,15 +50,17 @@ def center_G(G: np.ndarray, p: np.ndarray, P: int) -> np.ndarray:
     return G_centered
 
 def standardize_G(G: np.ndarray, p: np.ndarray, P: int,
-                      impute: bool = True, std_method: str = 'observed'):
+                      impute: bool = True, std_method: str = 'observed',
+                      target_var: float = 1.0):
     '''
-    Standardizes genotype matrix so that each column has mean 0 and standard deviation of 1 (or approximately).
+    Standardizes genotype matrix so that each column has mean 0 and variance `target_var` (or approximately).
     Parameters:
         G (2D array): *M matrix of genotypes. First dimension is individuals, second dimension is variants. Each element is an integer ranging from 0 to P (the ploidy).
         p (1D array): Array of length M containing allele frequencies from which to center genotypes. Also used to scale genotypes.
         P (int): Ploidy of genotype matrix.
         impute (bool): If genotype matrix is a masked array, missing values are filled with the mean genotype value. Default is True.
         std_method (str): Method for calculating genotype standard deviations. If 'observed' (default), then the actual mathematical standard deviation is used. If 'binomial', then the expected standard deviation based on binomial sampling of the allele frequency is used.
+        target_var (float): Desired variance of each standardized column. Default is 1.0.
     Returns:
         X (2D array): N*M standardized genotype matrix.
     '''
@@ -77,6 +79,8 @@ def standardize_G(G: np.ndarray, p: np.ndarray, P: int,
     var_G[var_G == 0] = 1
     # standardizes genotype matrix
     X = G / np.sqrt(var_G)[None,:]
+    if target_var != 1:
+        X = X * np.sqrt(target_var)
     return X
 
 def compute_GRM(X: np.ndarray) -> np.ndarray:

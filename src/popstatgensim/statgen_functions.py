@@ -480,7 +480,7 @@ def plot_HE_regression(A: np.ndarray, y: np.ndarray, bins: int = 5) -> None:
 
 def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None], X: np.ndarray = None, init: list[float] = None,
              method: str = 'EM', tol: float = 1e-5, max_iter: int = 1000,
-             force_non_neg: bool = False, verbose: int = 2) -> Tuple[np.ndarray, np.ndarray, float]:
+             force_non_neg: bool = False, std_y: bool = False, verbose: int = 2) -> Tuple[np.ndarray, np.ndarray, float]:
     '''
     Runs REML for estimating variance components while accounting for fixed effects. Different algorithms are available.
     Parameters:
@@ -497,6 +497,7 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
         tol (float): Tolerance for convergence. Default is 1e-5.
         max_iter (int): Maximum number of iterations. Default is 1000.
         force_non_neg (bool): If True, forces variance components to be non-negative. Default is False.
+        std_y (bool): If True, standardizes y to have variance 1 before running REML. Default is False. Regardless, y is always mean centered
         verbose (int): Level of verbosity. 0 = silent, 1 = variance components per iteration (excluding residual), 2 = all variance components and offsets per iteration. 3 = same as level 2 but one component per line. Default is 2.
     Returns:
         output (dict): Dictionary containing the following keys:
@@ -509,7 +510,9 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
             - 'log_likelihood': Log-likelihood of the model.
     '''
     N = y.shape[0] # number of individuals
-    y = (y - y.mean()) / y.std()  # standardizes y to have mean 0 and variance 1
+    y = y - y.mean() # mean centers y
+    if std_y:
+        y = y / y.std()  # standardizes y to have variance 1
 
     # adds residual matrix to Zs and Bs and initial guess
     Zs.append(np.identity(N))  # residual design matrix (identity)
@@ -544,6 +547,7 @@ def run_REML(y: np.ndarray, Bs: list[np.ndarray], Zs: list[np.ndarray] = [None],
     else:
         raise ValueError(f"Method '{method}' is not implemented. See documentation.")
 
+    print('Now computing standard errors and log-likelihood with final variance component estimates...')
     # final V matrix after convergence
     (V, V_inv) = _get_V_components(Vs_i, vars_i)  # computes V, and V_inv
 
