@@ -1247,7 +1247,6 @@ class Trait:
                 trait_new.y_[component] = np.concatenate([trait.y_[component] for trait in traits])
             # updates variance components
             trait_new.var['Eps'] = trait_new.y_['Eps'].var()
-            trait_new.h2 = trait_new.var['G'] / np.sum(list(trait_new.var.values()))
 
         return trait_new
 
@@ -1275,7 +1274,6 @@ class Trait:
             trait_new.y_[component] = self.y_[component][i_keep]
         # updates variance components
         trait_new.var['Eps'] = trait_new.y_['Eps'].var()
-        trait_new.h2 = trait_new.var['G'] / np.sum(list(trait_new.var.values()))
 
         return trait_new
         
@@ -1517,6 +1515,17 @@ class SuperPopulation:
             pop_kwargs.pop('M_causal', None)
             # adds trait to population using pre-computed effects
             pop.add_trait_from_effects(name=name, effects=effects_per_allele, per_allele=True, **pop_kwargs)
+
+    def add_subpop_trait(self):
+        '''
+        Adds a fixed trait named `subpop` to each active population in the superpopulation.
+        Each individual in an active population receives the index of that population in
+        the superpopulation's `pops` list.
+        '''
+        for pop_i in self.active_i:
+            pop = self.pops[pop_i]
+            y = np.full(pop.N, pop_i, dtype=int)
+            pop.add_trait_from_fixed_values(name='subpop', y=y)
 
     ####################
     #### Simulating ####
