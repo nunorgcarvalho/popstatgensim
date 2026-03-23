@@ -55,7 +55,7 @@ def standardize_G(G: np.ndarray, p: np.ndarray, P: int,
     '''
     Standardizes genotype matrix so that each column has mean 0 and variance `target_var` (or approximately).
     Parameters:
-        G (2D array): *M matrix of genotypes. First dimension is individuals, second dimension is variants. Each element is an integer ranging from 0 to P (the ploidy).
+        G (2D array): N*M matrix of genotypes. First dimension is individuals, second dimension is variants. Each element is an integer ranging from 0 to P (the ploidy).
         p (1D array): Array of length M containing allele frequencies from which to center genotypes. Also used to scale genotypes.
         P (int): Ploidy of genotype matrix.
         impute (bool): If genotype matrix is a masked array, missing values are filled with the mean genotype value. Default is True.
