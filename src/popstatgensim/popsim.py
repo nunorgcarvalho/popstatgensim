@@ -305,7 +305,9 @@ class Population:
         # if the trait contains indirect genetic effects, then Gpar needs to be passed
         if 'var_Gpar' in kwargs and kwargs['var_Gpar'] != 0:
             kwargs['Gpar'] = self.get_Gpar()
-        self.traits[name] = Trait(self.G, **kwargs)
+        trait = Trait(self.G, **kwargs)
+        trait.pop = self
+        self.traits[name] = trait
     
     def add_trait_from_effects(self, name: str, **kwargs):
         '''
@@ -314,7 +316,9 @@ class Population:
             name (str): Name of trait.
             **kwargs: All other arguments are passed to the Trait.from_effects() constructor.
         '''
-        self.traits[name] = Trait.from_effects(self.G, **kwargs)
+        trait = Trait.from_effects(self.G, **kwargs)
+        trait.pop = self
+        self.traits[name] = trait
     
     def add_trait_from_fixed_values(self, name: str, y: np.ndarray):
         '''
@@ -323,7 +327,9 @@ class Population:
             name (str): Name of trait.
             y (1D array): Trait values for each individual in the population.
         '''
-        self.traits[name] = Trait.from_fixed_values(y)
+        trait = Trait.from_fixed_values(y)
+        trait.pop = self
+        self.traits[name] = trait
 
     def update_traits(self, fixed_h2: bool = True, traits: list = None):
         '''
