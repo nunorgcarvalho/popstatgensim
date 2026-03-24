@@ -358,10 +358,11 @@ class Population:
                 continue
             trait = self.traits[key]
             if trait.type == 'composite':
-                G_input = self.G
-                if 'A_par' in trait.genetic_effects:
-                    G_input = {'A': self.G, 'A_par': self.get_Gpar()}
-                trait.generate_trait(G_input)
+                trait_inputs = {'G': self.G}
+                if 'A_par' in trait.effects:
+                    trait_inputs['G_par'] = self.get_Gpar()
+                trait.update_inputs(**trait_inputs)
+                trait.generate_trait()
             elif key == 'sex':
                 self.assign_sex()
 
@@ -988,7 +989,31 @@ class Population:
         plt.show()
 
 
-class GeneticEffects:
+
+
+class Effect:
+    '''
+    Base class for a component-generating rule in a trait.
+    '''
+    required_inputs: Tuple[str, ...] = ()
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def refresh_from_inputs(self, inputs: dict):
+        '''
+        Updates any cached state that depends on the current trait inputs.
+        '''
+        return None
+
+    def generate_component(self, inputs: dict) -> np.ndarray:
+        '''
+        Generates realized values for this component from the provided inputs.
+        '''
+        raise NotImplementedError
+
+
+class GeneticEffect(Effect):
     '''
     Stores the effect sizes for a single genetic component of a trait.
     '''
@@ -998,46 +1023,30 @@ class GeneticEffects:
                  G_std: np.ndarray = None, per_allele: bool = False):
         if name not in self.VALID_NAMES:
             raise ValueError(f"Unknown genetic effect name: {name}")
+        super().__init__(name)
 
         effects = np.asarray(effects, dtype=float)
         if effects.ndim != 1:
             raise ValueError('effects must be a 1D array.')
 
-        self.name = name
+        self.input_name = 'G' if name == 'A' else 'G_par'
+        self.g_std_input_name = 'G_std' if name == 'A' else 'G_par_std'
+        self.required_inputs = (self.input_name, self.g_std_input_name)
+
         if G_std is None:
             if G is None:
-                raise ValueError('Must provide either G or G_std when initializing GeneticEffects.')
-            self.set_G_std(G)
+                raise ValueError('Must provide either G or G_std when initializing GeneticEffect.')
+            G_std = stat.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
         else:
             G_std = np.asarray(G_std, dtype=float)
             if G_std.ndim != 1:
                 raise ValueError('G_std must be a 1D array.')
-            self.G_std = G_std.copy()
+        self.G_std = G_std.copy()
 
         if self.G_std.shape[0] != effects.shape[0]:
             raise ValueError('Length of effects must match length of G_std.')
 
         self.set_effects(effects, per_allele=per_allele)
-
-    def set_G_std(self, G: np.ndarray):
-        '''
-        Sets the genotype standard deviations used for converting between standardized
-        and per-allele effects.
-        '''
-        G = np.asarray(G)
-        if G.ndim != 2:
-            raise ValueError('G must be a 2D array.')
-        P = int(G.max()) if G.size > 0 else None
-        self.G_std = stat.get_G_std_for_effects(G, P=P)
-
-        if hasattr(self, 'effects'):
-            self.effects_per_allele = stat.get_standardized_effects(
-                self.effects, self.G_std, std2allelic=True
-            )
-        elif hasattr(self, 'effects_per_allele'):
-            self.effects = stat.get_standardized_effects(
-                self.effects_per_allele, self.G_std, std2allelic=False
-            )
 
     def set_effects(self, effects: np.ndarray, per_allele: bool = False):
         '''
@@ -1063,16 +1072,56 @@ class GeneticEffects:
         self.j_causal = np.where(self.effects != 0)[0]
         self.M_causal = len(self.j_causal)
 
-    def get_genetic_values(self, G: np.ndarray) -> np.ndarray:
+    def refresh_from_inputs(self, inputs: dict):
         '''
-        Computes realized genetic values from a genotype matrix.
+        Refreshes the standardized effects from the current genotype standard deviations.
         '''
-        G = np.asarray(G)
+        if self.g_std_input_name not in inputs:
+            raise ValueError(f"Missing required input '{self.g_std_input_name}' for effect {self.name}.")
+        G_std = np.asarray(inputs[self.g_std_input_name], dtype=float)
+        if G_std.ndim != 1:
+            raise ValueError(f"Input '{self.g_std_input_name}' must be a 1D array.")
+        if G_std.shape[0] != self.effects_per_allele.shape[0]:
+            raise ValueError(f"Input '{self.g_std_input_name}' has incompatible length for effect {self.name}.")
+        self.G_std = G_std.copy()
+        self.effects = stat.get_standardized_effects(
+            self.effects_per_allele, self.G_std, std2allelic=False
+        )
+
+    def generate_component(self, inputs: dict) -> np.ndarray:
+        '''
+        Computes realized genetic values from the current genotype input.
+        '''
+        if self.input_name not in inputs:
+            raise ValueError(f"Missing required input '{self.input_name}' for effect {self.name}.")
+        G = np.asarray(inputs[self.input_name])
         if G.ndim != 2:
-            raise ValueError('G must be a 2D array.')
+            raise ValueError(f"Input '{self.input_name}' must be a 2D array.")
         if G.shape[1] != self.effects.shape[0]:
-            raise ValueError('Number of variants in G must match number of effects.')
+            raise ValueError(f"Input '{self.input_name}' has incompatible number of variants for effect {self.name}.")
         return stat.compute_genetic_value(G, self.effects_per_allele)
+
+
+class NoiseEffect(Effect):
+    '''
+    Stores the generation rule for a noise component.
+    '''
+    VALID_NAMES = {'Eps'}
+    required_inputs = ('N',)
+
+    def __init__(self, name: str = 'Eps', var: float = 0.0):
+        if name not in self.VALID_NAMES:
+            raise ValueError(f"Unknown noise effect name: {name}")
+        super().__init__(name)
+        self.var = var
+
+    def generate_component(self, inputs: dict) -> np.ndarray:
+        '''
+        Generates realized noise values for N individuals.
+        '''
+        if 'N' not in inputs:
+            raise ValueError("Missing required input 'N' for effect Eps.")
+        return stat.generate_noise_value(int(inputs['N']), self.var)
 
 
 class Trait:
@@ -1080,23 +1129,19 @@ class Trait:
     Class for a trait belonging to a Population object.
     '''
     VALID_GENETIC_COMPONENTS = {'A', 'A_par'}
+    VALID_EFFECT_COMPONENTS = {'A', 'A_par', 'Eps'}
+    DERIVED_INPUTS = {'G_std', 'G_par_std'}
 
     def __init__(self, G: np.ndarray, M_causal: int = None, dist: str = 'normal',
                  var_A: float = 1.0, var_Eps: float = 0.0,
-                 var_A_par: float = 0.0, G_par: np.ndarray = None,
-                 random_effects: dict = None):
+                 var_A_par: float = 0.0, G_par: np.ndarray = None):
         '''
         Initializes and generates a trait from variance components.
         '''
         self._initialize_empty()
-        self.random_effects = self._normalize_random_effects(random_effects)
-
-        G = np.asarray(G)
-        if G.ndim != 2:
-            raise ValueError('G must be a 2D array.')
 
         effects_A, _ = stat.generate_causal_effects(G.shape[1], M_causal, var_A, dist)
-        self.genetic_effects['A'] = GeneticEffects('A', effects_A, G=G)
+        self.effects['A'] = GeneticEffect('A', effects_A, G=G)
         self.var_initial['A'] = var_A
 
         if var_A_par != 0:
@@ -1104,29 +1149,21 @@ class Trait:
                 raise ValueError('Must provide G_par when var_A_par is non-zero.')
             if var_A <= 0:
                 raise ValueError('var_A must be positive to construct correlated A_par effects.')
-            effects_A_par = self.genetic_effects['A'].effects * np.sqrt(var_A_par / var_A)
-            self.genetic_effects['A_par'] = GeneticEffects('A_par', effects_A_par, G=G_par)
+            effects_A_par = self.effects['A'].effects * np.sqrt(var_A_par / var_A)
+            self.effects['A_par'] = GeneticEffect('A_par', effects_A_par, G=G_par)
             self.var_initial['A_par'] = var_A_par
 
+        self.effects['Eps'] = NoiseEffect('Eps', var=var_Eps)
+        self.var['Eps'] = var_Eps
         self.var_initial['Eps'] = var_Eps
-        if self.random_effects is not None:
-            for name, var in zip(self.random_effects['name'], self.random_effects['var']):
-                self.var_initial[name] = var
 
-        self.generate_trait(G=G, G_par=G_par, random_effects=self.random_effects)
-
-    @staticmethod
-    def _normalize_random_effects(random_effects: dict = None) -> dict:
-        if random_effects is None:
-            return None
-        random_effects = copy.deepcopy(random_effects)
-        if 'name' not in random_effects or 'var' not in random_effects:
-            raise ValueError("random_effects must contain 'name' and 'var'.")
-        random_effects['name'] = [
-            name if name.startswith('RE_') else f'RE_{name}'
-            for name in random_effects['name']
-        ]
-        return random_effects
+        init_inputs = {'G': G, 'G_std': self.effects['A'].G_std}
+        if G_par is not None:
+            init_inputs['G_par'] = G_par
+        if 'A_par' in self.effects:
+            init_inputs['G_par_std'] = self.effects['A_par'].G_std
+        self.update_inputs(**init_inputs)
+        self.generate_trait()
 
     @classmethod
     def _coerce_effects_dict(cls, effects: Union[np.ndarray, dict]) -> dict:
@@ -1144,11 +1181,13 @@ class Trait:
         return effects_dict
 
     @classmethod
-    def _coerce_genotype_dict(cls, G: Union[np.ndarray, dict], G_par: np.ndarray = None) -> dict:
-        if isinstance(G, dict):
-            G_dict = {key: np.asarray(value) for key, value in G.items()}
-        else:
-            G_dict = {'A': np.asarray(G)}
+    def _coerce_genotype_dict(cls, G: Union[np.ndarray, dict] = None, G_par: np.ndarray = None) -> dict:
+        G_dict = {}
+        if G is not None:
+            if isinstance(G, dict):
+                G_dict = {key: np.asarray(value) for key, value in G.items()}
+            else:
+                G_dict = {'A': np.asarray(G)}
 
         if G_par is not None:
             G_dict['A_par'] = np.asarray(G_par)
@@ -1178,9 +1217,76 @@ class Trait:
         self.y_ = {}
         self.var = {}
         self.var_initial = {}
-        self.genetic_effects = {}
-        self.random_effects = None
+        self.effects = {}
+        self.inputs = {}
         self.type = 'composite'
+
+    def _refresh_derived_inputs(self):
+        '''
+        Updates derived inputs from the currently stored primary inputs.
+        '''
+        N_candidates = []
+        if 'G' in self.inputs:
+            G = np.asarray(self.inputs['G'])
+            if G.ndim != 2:
+                raise ValueError("Trait input 'G' must be a 2D array.")
+            self.inputs['G'] = G
+            G_std = self.inputs.get('G_std')
+            if G_std is not None:
+                G_std = np.asarray(G_std, dtype=float)
+                if G_std.ndim != 1 or G_std.shape[0] != G.shape[1]:
+                    raise ValueError("Trait input 'G_std' must be a 1D array matching the number of variants in G.")
+                self.inputs['G_std'] = G_std
+            else:
+                self.inputs['G_std'] = stat.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
+            N_candidates.append(G.shape[0])
+        if 'G_par' in self.inputs:
+            G_par = np.asarray(self.inputs['G_par'])
+            if G_par.ndim != 2:
+                raise ValueError("Trait input 'G_par' must be a 2D array.")
+            self.inputs['G_par'] = G_par
+            G_par_std = self.inputs.get('G_par_std')
+            if G_par_std is not None:
+                G_par_std = np.asarray(G_par_std, dtype=float)
+                if G_par_std.ndim != 1 or G_par_std.shape[0] != G_par.shape[1]:
+                    raise ValueError("Trait input 'G_par_std' must be a 1D array matching the number of variants in G_par.")
+                self.inputs['G_par_std'] = G_par_std
+            else:
+                self.inputs['G_par_std'] = stat.get_G_std_for_effects(G_par, P=int(G_par.max()) if G_par.size > 0 else None)
+            N_candidates.append(G_par.shape[0])
+
+        if N_candidates:
+            N_current = int(N_candidates[0])
+            if any(n != N_current for n in N_candidates):
+                raise ValueError('Trait inputs have inconsistent numbers of individuals.')
+            if 'N' in self.inputs and int(self.inputs['N']) != N_current:
+                raise ValueError("Trait input 'N' is inconsistent with the provided matrices.")
+            self.inputs['N'] = N_current
+        elif 'N' in self.inputs:
+            self.inputs['N'] = int(self.inputs['N'])
+        else:
+            raise ValueError("Trait input 'N' must always be available.")
+
+    def update_inputs(self, inputs: dict = None, **kwargs):
+        '''
+        Updates the stored inputs for the trait and refreshes any derived inputs.
+        '''
+        new_inputs = {} if inputs is None else copy.deepcopy(inputs)
+        new_inputs.update(kwargs)
+
+        if 'G' in new_inputs or 'A' in new_inputs or 'A_par' in new_inputs:
+            G_dict = self._coerce_genotype_dict(new_inputs.pop('G', None), G_par=new_inputs.pop('G_par', None))
+            if 'A' in new_inputs:
+                G_dict['A'] = np.asarray(new_inputs.pop('A'))
+            if 'A_par' in new_inputs:
+                G_dict['A_par'] = np.asarray(new_inputs.pop('A_par'))
+            if 'A' in G_dict:
+                new_inputs['G'] = G_dict['A']
+            if 'A_par' in G_dict:
+                new_inputs['G_par'] = G_dict['A_par']
+
+        self.inputs.update(new_inputs)
+        self._refresh_derived_inputs()
 
     def _update_empirical_variances(self):
         self.var = {name: values.var() for name, values in self.y_.items()}
@@ -1199,13 +1305,19 @@ class Trait:
             raise ValueError('Trait.var must be a dictionary.')
         if not isinstance(self.var_initial, dict):
             raise ValueError('Trait.var_initial must be a dictionary.')
-        if not isinstance(self.genetic_effects, dict):
-            raise ValueError('Trait.genetic_effects must be a dictionary.')
+        if not isinstance(self.effects, dict):
+            raise ValueError('Trait.effects must be a dictionary.')
+        if not isinstance(self.inputs, dict):
+            raise ValueError('Trait.inputs must be a dictionary.')
+        if 'N' not in self.inputs:
+            raise ValueError("Trait.inputs must contain 'N'.")
 
         self.y = np.asarray(self.y)
         if self.y.ndim != 1:
             raise ValueError('Trait.y must be a 1D array.')
         N = self.y.shape[0]
+        if int(self.inputs['N']) != N:
+            raise ValueError("Trait input 'N' is inconsistent with Trait.y.")
 
         component_sum = np.zeros(N, dtype=float)
         for name, values in self.y_.items():
@@ -1226,34 +1338,37 @@ class Trait:
         if self.y_ and not np.allclose(self.y, component_sum):
             raise ValueError('Trait.y must equal the sum of Trait.y_ components.')
 
-        invalid = set(self.genetic_effects) - self.VALID_GENETIC_COMPONENTS
+        invalid = set(self.effects) - self.VALID_EFFECT_COMPONENTS
         if invalid:
-            raise ValueError(f'Unknown genetic effect names: {sorted(invalid)}')
-        for name, genetic_effects in self.genetic_effects.items():
-            if not isinstance(genetic_effects, GeneticEffects):
-                raise ValueError(f'genetic_effects[{name}] must be a GeneticEffects object.')
+            raise ValueError(f'Unknown effect names: {sorted(invalid)}')
+        for name, effect in self.effects.items():
+            if name in self.VALID_GENETIC_COMPONENTS:
+                if not isinstance(effect, GeneticEffect):
+                    raise ValueError(f'effects[{name}] must be a GeneticEffect object.')
+            elif name == 'Eps':
+                if not isinstance(effect, NoiseEffect):
+                    raise ValueError('effects[Eps] must be a NoiseEffect object.')
+            for input_name in effect.required_inputs:
+                if input_name not in self.inputs:
+                    raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
             if name not in self.y_:
-                raise ValueError(f'Missing realized component for genetic effect {name}.')
+                raise ValueError(f'Missing realized component for effect {name}.')
 
-        if self.type == 'composite' and 'Eps' not in self.y_:
-            raise ValueError('Composite traits must contain an Eps component.')
-
-    def has_random_effects(self) -> bool:
-        return any(name.startswith('RE_') for name in self.y_)
+        if self.type == 'composite' and 'Eps' not in self.effects:
+            raise ValueError('Composite traits must contain an Eps effect.')
 
     @classmethod
     def from_effects(cls, G: Union[np.ndarray, dict], effects: Union[np.ndarray, dict],
                      per_allele: Union[bool, dict] = False,
-                     var_Eps: float = 0.0, random_effects: dict = None) -> 'Trait':
+                     var_Eps: float = 0.0, G_par: np.ndarray = None) -> 'Trait':
         '''
         Initializes a trait from one or more specified genetic effect arrays.
         '''
         trait = cls.__new__(cls)
         trait._initialize_empty()
-        trait.random_effects = trait._normalize_random_effects(random_effects)
 
         effects_dict = trait._coerce_effects_dict(effects)
-        G_dict = trait._coerce_genotype_dict(G)
+        G_dict = trait._coerce_genotype_dict(G, G_par=G_par)
         per_allele_dict = trait._coerce_per_allele(per_allele, set(effects_dict))
 
         missing = set(effects_dict) - set(G_dict)
@@ -1261,17 +1376,27 @@ class Trait:
             raise ValueError(f'Missing genotype matrices for effects: {sorted(missing)}')
 
         for name, effect_array in effects_dict.items():
-            trait.genetic_effects[name] = GeneticEffects(
-                name, effect_array, G=G_dict[name], per_allele=per_allele_dict[name]
+            G_input = G_dict['A'] if name == 'A' else G_dict['A_par']
+            trait.effects[name] = GeneticEffect(
+                name, effect_array, G=G_input, per_allele=per_allele_dict[name]
             )
 
+        trait.effects['Eps'] = NoiseEffect('Eps', var=var_Eps)
+        trait.var['Eps'] = var_Eps
         trait.var_initial['Eps'] = var_Eps
-        if trait.random_effects is not None:
-            for name, var in zip(trait.random_effects['name'], trait.random_effects['var']):
-                trait.var_initial[name] = var
 
-        trait.generate_trait(G=G_dict, random_effects=trait.random_effects)
-        for name in trait.genetic_effects:
+        init_inputs = {}
+        if 'A' in G_dict:
+            init_inputs['G'] = G_dict['A']
+            init_inputs['G_std'] = trait.effects['A'].G_std
+        if 'A_par' in G_dict:
+            init_inputs['G_par'] = G_dict['A_par']
+            init_inputs['G_par_std'] = trait.effects['A_par'].G_std
+        trait.update_inputs(**init_inputs)
+        trait.generate_trait()
+        for name in trait.effects:
+            if name == 'Eps':
+                continue
             trait.var_initial.setdefault(name, trait.var[name])
         trait.validate()
         return trait
@@ -1288,47 +1413,27 @@ class Trait:
             raise ValueError('y must be a 1D array.')
         trait.y = y.copy()
         trait.y_ = {'fixed': y.copy()}
+        trait.inputs = {'N': y.shape[0]}
         trait.type = 'fixed'
         trait._update_empirical_variances()
         trait._fill_missing_initial_variances()
         trait.validate()
         return trait
 
-    def generate_trait(self, G: Union[np.ndarray, dict], G_par: np.ndarray = None,
-                       random_effects: dict = None):
+    def generate_trait(self, inputs: dict = None, **kwargs):
         '''
-        Generates or updates trait values from the stored component architecture.
+        Generates or updates trait values from the stored effects and current inputs.
         '''
         if self.type == 'fixed':
-            raise ValueError('Cannot regenerate a fixed trait from genetic architecture.')
-
-        G_dict = self._coerce_genotype_dict(G, G_par=G_par)
-        if random_effects is None:
-            random_effects = self.random_effects
-        else:
-            random_effects = self._normalize_random_effects(random_effects)
-            self.random_effects = random_effects
+            raise ValueError('Cannot regenerate a fixed trait from stored effects.')
+        if inputs is not None or kwargs:
+            self.update_inputs(inputs=inputs, **kwargs)
 
         self.y_ = {}
-        N = None
-        for name, genetic_effects in self.genetic_effects.items():
-            if name not in G_dict:
-                raise ValueError(f'Missing genotype matrix for genetic component {name}.')
-            self.y_[name] = genetic_effects.get_genetic_values(G_dict[name])
-            if N is None:
-                N = self.y_[name].shape[0]
+        for name, effect in self.effects.items():
+            effect.refresh_from_inputs(self.inputs)
+            self.y_[name] = effect.generate_component(self.inputs)
 
-        if N is None:
-            if not G_dict:
-                raise ValueError('Must provide at least one genotype matrix to generate a composite trait.')
-            N = next(iter(G_dict.values())).shape[0]
-
-        if random_effects is not None:
-            for i, name in enumerate(random_effects['name']):
-                self.y_[name] = random_effects['Z'][i] @ random_effects['u'][i]
-
-        var_Eps = self.var_initial.get('Eps', 0.0)
-        self.y_['Eps'] = stat.generate_noise_value(N, var_Eps)
         self.y = np.sum(np.column_stack(list(self.y_.values())), axis=1)
         self.type = 'composite'
         self._update_empirical_variances()
@@ -1351,9 +1456,9 @@ class Trait:
         elif method == 'additive_variance':
             var_a = self.y_['A'].var()
         elif method == 'additive_effects':
-            if 'A' not in self.genetic_effects:
+            if 'A' not in self.effects:
                 raise Exception("Trait must have additive genetic effects to compute heritability with method='additive_effects'.")
-            var_a = np.sum(self.genetic_effects['A'].effects**2)
+            var_a = np.sum(self.effects['A'].effects**2)
         else:
             raise ValueError(f"Unknown heritability method: {method}")
 
@@ -1392,8 +1497,6 @@ class Trait:
 
         for trait in traits:
             trait.validate()
-        if any(trait.has_random_effects() for trait in traits):
-            raise ValueError('Cannot concatenate traits that contain random effects.')
 
         first = traits[0]
         if any(trait.type != first.type for trait in traits):
@@ -1404,7 +1507,6 @@ class Trait:
         trait_new = cls.__new__(cls)
         trait_new._initialize_empty()
         trait_new.type = first.type
-        trait_new.random_effects = None
         trait_new.y_ = {
             name: np.concatenate([trait.y_[name] for trait in traits])
             for name in first.y_.keys()
@@ -1412,9 +1514,21 @@ class Trait:
         trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
         trait_new._update_empirical_variances()
         trait_new.var_initial = copy.deepcopy(first.var_initial)
-        trait_new.genetic_effects = copy.deepcopy(first.genetic_effects)
-        if trait_new.genetic_effects and len(traits) > 1:
-            warnings.warn('Using the GeneticEffects objects from the first trait when concatenating traits.')
+        trait_new.effects = copy.deepcopy(first.effects)
+        if any(isinstance(effect, GeneticEffect) for effect in trait_new.effects.values()) and len(traits) > 1:
+            warnings.warn('Using the effects objects from the first trait when concatenating traits.')
+
+        trait_new.inputs = {'N': sum(int(trait.inputs['N']) for trait in traits)}
+        shared_input_keys = set.intersection(*[set(trait.inputs.keys()) for trait in traits])
+        for key in shared_input_keys - {'N'} - cls.DERIVED_INPUTS:
+            values = [trait.inputs[key] for trait in traits]
+            first_value = values[0]
+            if isinstance(first_value, np.ndarray) and first_value.ndim >= 1 and first_value.shape[0] == int(traits[0].inputs['N']):
+                trait_new.inputs[key] = np.concatenate(values, axis=0)
+            else:
+                trait_new.inputs[key] = copy.deepcopy(first_value)
+        trait_new._refresh_derived_inputs()
+
         trait_new._fill_missing_initial_variances()
         trait_new.validate()
         return trait_new
@@ -1428,7 +1542,6 @@ class Trait:
         trait_new = self.__class__.__new__(self.__class__)
         trait_new._initialize_empty()
         trait_new.type = self.type
-        trait_new.random_effects = copy.deepcopy(self.random_effects)
         trait_new.y = self.y[i_keep].copy()
         trait_new.y_ = {
             name: values[i_keep].copy()
@@ -1436,7 +1549,19 @@ class Trait:
         }
         trait_new._update_empirical_variances()
         trait_new.var_initial = copy.deepcopy(self.var_initial)
-        trait_new.genetic_effects = copy.deepcopy(self.genetic_effects)
+        trait_new.effects = copy.deepcopy(self.effects)
+
+        trait_new.inputs = {'N': len(i_keep)}
+        N_old = int(self.inputs['N']) if 'N' in self.inputs else None
+        for key, value in self.inputs.items():
+            if key == 'N' or key in self.DERIVED_INPUTS:
+                continue
+            if isinstance(value, np.ndarray) and value.ndim >= 1 and N_old is not None and value.shape[0] == N_old:
+                trait_new.inputs[key] = value[i_keep].copy()
+            else:
+                trait_new.inputs[key] = copy.deepcopy(value)
+        trait_new._refresh_derived_inputs()
+
         trait_new._fill_missing_initial_variances()
         trait_new.validate()
         return trait_new
@@ -1569,8 +1694,6 @@ class SuperPopulation:
 
         new_pop.Haplos = Haplos
         # adds Trait objects by concatenating them, assumes the first population has all traits
-        if any(any(trait.has_random_effects() for trait in pop.traits.values()) for pop in [self.pops[i] for i in pop_i]):
-            raise ValueError('Cannot join populations with traits that contain random effects.')
         for name in self.pops[pop_i[0]].traits.keys():
             # concatenates traits from all populations being joined
             traits = [self.pops[i].traits[name] for i in pop_i]
@@ -1618,8 +1741,6 @@ class SuperPopulation:
             new_pop = Population.from_H(H_new)
             # updates traits
             for name, trait in source.traits.items():
-                if trait.has_random_effects():
-                    raise ValueError('Cannot split populations with traits that contain random effects.')
                 trait_new = trait.index_trait(i_new, source.G, G_already_indexed=False)
                 trait_new.pop = new_pop
                 new_pop.traits[name] = trait_new
