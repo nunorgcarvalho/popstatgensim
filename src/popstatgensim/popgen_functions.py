@@ -267,6 +267,66 @@ def draw_p_init(M, method: str, params: list) -> np.ndarray:
 #### Analysis of allele frequencies ####
 ########################################
 
+def get_FST(p1: np.ndarray, p2: np.ndarray, method: str = 'exact',
+            N1: int = None, N2: int = None) -> float:
+    '''
+    Computes FST between two populations from vectors of allele frequencies.
+    Parameters:
+        p1 (1D array): Array of allele frequencies for population 1.
+        p2 (1D array): Array of allele frequencies for population 2. Must have the same length as `p1`.
+        method (str): Method used to estimate FST. Options are:
+            'exact': Uses the heterozygosity-based definition FST = (Ht - Hs) / Ht.
+            'hudson': Uses the Hudson estimator, which adjusts for finite sample sizes. Requires `N1` and `N2`.
+        N1 (int): Sample size for population 1. Required if `method='hudson'`.
+        N2 (int): Sample size for population 2. Required if `method='hudson'`.
+    Returns:
+        FST (float): FST estimate across the provided variants.
+    '''
+    p1 = np.asarray(p1, dtype=float)
+    p2 = np.asarray(p2, dtype=float)
+
+    if p1.ndim != 1 or p2.ndim != 1:
+        raise ValueError('`p1` and `p2` must both be 1-dimensional arrays.')
+    if p1.shape != p2.shape:
+        raise ValueError('`p1` and `p2` must have the same length.')
+
+    valid_mask = np.isfinite(p1) & np.isfinite(p2)
+    if not np.any(valid_mask):
+        raise ValueError('`p1` and `p2` must contain at least one finite allele frequency.')
+
+    p1 = p1[valid_mask]
+    p2 = p2[valid_mask]
+
+    if np.any((p1 < 0) | (p1 > 1)) or np.any((p2 < 0) | (p2 > 1)):
+        raise ValueError('Allele frequencies must lie between 0 and 1.')
+
+    method = method.lower()
+
+    if method == 'exact':
+        p_bar = (p1 + p2) / 2
+        Ht = 2 * p_bar * (1 - p_bar)
+        Hs = p1 * (1 - p1) + p2 * (1 - p2)
+        num = Ht - Hs
+        denom = Ht
+    elif method == 'hudson':
+        if N1 is None or N2 is None:
+            raise ValueError('`N1` and `N2` must be provided when `method="hudson"`.')
+        if N1 <= 1 or N2 <= 1:
+            raise ValueError('`N1` and `N2` must both be greater than 1 for the Hudson estimator.')
+
+        num = (p1 - p2) ** 2 - p1 * (1 - p1) / (N1 - 1) - p2 * (1 - p2) / (N2 - 1)
+        denom = p1 + p2 - 2 * p1 * p2
+    else:
+        raise ValueError("`method` must be either 'exact' or 'hudson'.")
+
+    informative_mask = denom > 0
+    if not np.any(informative_mask):
+        raise ValueError('No informative variants remain after filtering monomorphic sites.')
+
+    FST = np.mean(num[informative_mask]) / np.mean(denom[informative_mask])
+    return FST
+
+
 def get_fixation_t(ps: np.ndarray = None) -> np.ndarray:
     '''
     For each variant, finds *first* generation (returned as an index) for which the allele frequency is 0 (loss) or 1 (fixation). A value of -1 means the variant never got fixed
