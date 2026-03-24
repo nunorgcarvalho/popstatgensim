@@ -731,8 +731,7 @@ class Population:
         relations = {'spouses': rel_spouses.astype(np.uint8), # occupies more space than a bool, but cleaner to see
                      'parents': rel_parents.astype(np.uint8),
                      'par_idx': par_idx, # stores actual indices of parents
-                     'full_sibs': rel_fullsibs.astype(np.uint8),
-                     'household': M_mate.astype(np.uint8)}
+                     'full_sibs': rel_fullsibs.astype(np.uint8)}
 
         return (H, relations, Haplos)
 
@@ -1665,41 +1664,145 @@ class SuperPopulation:
         if update_era: 
             self._update_era() # updates era, active indices, and history
 
-    def join_populations(self, pop_i: list, shared_haplotypes: bool = False):
+    def _join_populations_build(self, pops: list, shared_haplotypes: bool = False,
+                                keep_past_generations: int = 0,
+                                generation: int = 0) -> Optional[Population]:
+        '''
+        Internal helper for joining population objects without mutating the superpopulation.
+        `generation` indexes which entry of each source population's `past` list is being joined.
+        '''
+        if len(pops) < 2:
+            raise ValueError("Must specify at least two populations to join.")
+
+        gen_pops = []
+        for pop_i in pops:
+            if generation == 0:
+                gen_pop = pop_i
+            else:
+                if (pop_i.past is None or len(pop_i.past) <= generation or
+                        pop_i.past[generation] is None):
+                    return None
+                gen_pop = pop_i.past[generation]
+            gen_pops.append(gen_pop)
+
+        # merges haplotypes of specified populations
+        H = np.concatenate([pop_i.H for pop_i in gen_pops], axis=0)
+        track_pedigree = any(pop_i.track_pedigree for pop_i in gen_pops)
+        new_pop = Population.from_H(H, keep_past_generations=keep_past_generations,
+                                    track_pedigree=track_pedigree)
+
+        # preserves shared genome metadata from the first population
+        new_pop.R = gen_pops[0].R.copy()
+        new_pop.BPs = gen_pops[0].BPs.copy()
+        new_pop.t = gen_pops[0].t
+        new_pop.T_breaks = copy.deepcopy(gen_pops[0].T_breaks)
+
+        # merging Haplotype IDs
+        if shared_haplotypes:
+            Haplos = np.concatenate([pop_i.Haplos for pop_i in gen_pops], axis=0)
+        else:
+            shift = 0
+            P = gen_pops[0].Haplos.shape[2]  # ploidy: number of haplotypes per individual
+            Haplos_list = []
+            for pop_i in gen_pops:
+                Haplos_i = pop_i.Haplos.copy()
+                valid_mask = Haplos_i >= 0
+                Haplos_i[valid_mask] += shift
+                Haplos_list.append(Haplos_i)
+                shift += P * pop_i.N
+            Haplos = np.concatenate(Haplos_list, axis=0)
+        new_pop.Haplos = Haplos
+
+        # adds Trait objects by concatenating them, assumes the first population has all traits
+        for name in gen_pops[0].traits.keys():
+            traits = [pop_i.traits[name] for pop_i in gen_pops]
+            trait_new = Trait.concatenate_traits(traits, new_pop.G)
+            trait_new.pop = new_pop
+            new_pop.traits[name] = trait_new
+
+        # recursively joins older generations from the same source populations
+        joined_prev = None
+        if keep_past_generations > 0:
+            joined_prev = self._join_populations_build(
+                pops,
+                shared_haplotypes=shared_haplotypes,
+                keep_past_generations=keep_past_generations - 1,
+                generation=generation + 1
+            )
+            if joined_prev is not None:
+                new_pop.past[1] = joined_prev
+                for gen in range(2, keep_past_generations + 1):
+                    prev_gen = new_pop.past[gen - 1]
+                    if (prev_gen is None or prev_gen.past is None or
+                            len(prev_gen.past) < 2):
+                        break
+                    new_pop.past[gen] = prev_gen.past[1]
+
+        # updates relations
+        prev_N = joined_prev.N if joined_prev is not None else None
+        relations = pop.initialize_relations(new_pop.N, N1=prev_N)
+
+        for rel_type in ('full_sibs', 'spouses'):
+            rel_blocks = [pop_i.relations[rel_type] for pop_i in gen_pops]
+            relations[rel_type] = block_diag(*rel_blocks).astype(np.uint8)
+
+        if joined_prev is not None:
+            row_offsets = np.cumsum([0] + [pop_i.N for pop_i in gen_pops])
+            prev_sizes = [pop_i.relations['parents'].shape[1] for pop_i in gen_pops]
+            if sum(prev_sizes) != joined_prev.N:
+                raise ValueError(
+                    "Joined parent population size is incompatible with the source "
+                    "populations' parent relationship matrices."
+                )
+            col_offsets = np.cumsum([0] + prev_sizes)
+            parents = np.zeros((new_pop.N, joined_prev.N), dtype=np.uint8)
+            par_idx = np.full((new_pop.N, 2), -1, dtype=np.int32)
+
+            for k, pop_i in enumerate(gen_pops):
+                i_start = row_offsets[k]
+                i_end = row_offsets[k + 1]
+                j_start = col_offsets[k]
+                j_end = col_offsets[k + 1]
+
+                rel_parents = pop_i.relations['parents']
+                if rel_parents.shape[0] != pop_i.N or rel_parents.shape[1] != (j_end - j_start):
+                    raise ValueError(
+                        "Population parent relationship matrix has incompatible shape."
+                    )
+                parents[i_start:i_end, j_start:j_end] = rel_parents
+
+                pop_par_idx = pop_i.relations['par_idx'].copy()
+                valid_mask = pop_par_idx >= 0
+                pop_par_idx[valid_mask] += j_start
+                par_idx[i_start:i_end, :] = pop_par_idx
+
+            relations['parents'] = parents
+            relations['par_idx'] = par_idx
+
+        new_pop.relations = relations
+
+        if joined_prev is not None and track_pedigree:
+            new_pop.ped = Pedigree(new_pop.N, par_idx=relations['par_idx'],
+                                   par_Ped=joined_prev.ped)
+            new_pop.ped.construct_paths()
+
+        return new_pop
+
+    def join_populations(self, pop_i: list, shared_haplotypes: bool = False,
+                         keep_past_generations: int = 0):
         '''
         Joins multiple populations into a single population. Inactivates the original populations and creates a new population from the merged haplotypes. The new population is added to the superpopulation as an active population.
         Parameters:
             pop_i (list): List of indices of populations to join.
-            shared_haplotypes (bool): Whether the haplotype IDs stored inside the Haplos object of each population refer to the same haplotypes across populations. This is applicable when the populations being joined are either derived from the same ancestral population or are multiple generations of the same population. If true, haplotype IDs of a population are shifted by the number of individuals in the populations preceding it in the array. Default is False.
+            shared_haplotypes (bool): Whether haplotype IDs already refer to the same underlying founders across populations. If False, each population's non-negative haplotype IDs are shifted to remain unique after joining. Default is False.
+            keep_past_generations (int): Number of previous generations to preserve in the joined population. If greater than 0, the specified populations' stored past generations are recursively joined and attached to the new population's `past` attribute.
         '''
-        if len(pop_i) < 2:
-            raise ValueError("Must specify at least two populations to join.")
-        
-        # merges haplotypes of specified populations
-        H = np.concatenate([self.pops[i].H for i in pop_i], axis=0)
-        # creates new population from merged haplotypes
-        new_pop = Population.from_H(H, keep_past_generations=0)
-
-        # merging Haplotype IDs
-        if shared_haplotypes:
-            Haplos = np.concatenate([self.pops[i].Haplos for i in pop_i], axis=0)
-        else:
-            shift = 0
-            P = self.pops[pop_i[0]].Haplos.shape[2]  # ploidy: number of haplotypes per individual
-            Haplos_list = []
-            for i in pop_i:
-                Haplos_list.append( self.pops[i].Haplos + shift )
-                shift += P * self.pops[i].N
-            Haplos =  np.concatenate(Haplos_list, axis=0)
-
-        new_pop.Haplos = Haplos
-        # adds Trait objects by concatenating them, assumes the first population has all traits
-        for name in self.pops[pop_i[0]].traits.keys():
-            # concatenates traits from all populations being joined
-            traits = [self.pops[i].traits[name] for i in pop_i]
-            trait_new = Trait.concatenate_traits(traits, new_pop.G)
-            trait_new.pop = new_pop
-            new_pop.traits[name] = trait_new
+        pops = [self.pops[i] for i in pop_i]
+        new_pop = self._join_populations_build(
+            pops,
+            shared_haplotypes=shared_haplotypes,
+            keep_past_generations=keep_past_generations
+        )
         
         # updates superpopulation
         self.add_population(new_pop, active_new=True, update_era=False)
