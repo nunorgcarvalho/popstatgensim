@@ -261,7 +261,7 @@ class Population:
         '''
         self.GRM = pop.compute_GRM(self.X)
 
-    def get_RDR_SNP_GRMs(self) -> list:
+    def get_RDR_SNP_GRMs(self, G_par: np.ndarray = None) -> list:
         '''
         Constructs the three SNP-based GRMs used for Related Disequilibrium Regression (RDR). This could be done more efficiently by reusing intermediate calculations, but is currently implemented in a straightforward way for clarity.\
 
@@ -279,7 +279,8 @@ class Population:
         G_o = self.G
         X_o = pop.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
 
-        G_par = self.get_Gpar()
+        if G_par is None:
+            G_par = self.get_Gpar()
         p_par = G_par.mean(axis=0) / (2 * self.P)
         X_par = pop.standardize_G(G_par, p_par, 2 * self.P, impute=True,
                                   std_method='observed', target_var=2.0)
@@ -1101,6 +1102,29 @@ class GeneticEffect(Effect):
         return stat.compute_genetic_value(G, self.effects_per_allele)
 
 
+class FixedEffect(Effect):
+    '''
+    Stores the coefficient for a single fixed-effect covariate.
+    '''
+
+    def __init__(self, name: str, beta: float = 1.0, input_name: str = None):
+        super().__init__(name)
+        self.beta = float(beta)
+        self.input_name = name if input_name is None else input_name
+        self.required_inputs = (self.input_name,)
+
+    def generate_component(self, inputs: dict) -> np.ndarray:
+        '''
+        Computes realized fixed-effect values from the current covariate input.
+        '''
+        if self.input_name not in inputs:
+            raise ValueError(f"Missing required input '{self.input_name}' for effect {self.name}.")
+        x = np.asarray(inputs[self.input_name], dtype=float)
+        if x.ndim != 1:
+            raise ValueError(f"Input '{self.input_name}' must be a 1D array.")
+        return self.beta * x
+
+
 class NoiseEffect(Effect):
     '''
     Stores the generation rule for a noise component.
@@ -1133,7 +1157,9 @@ class Trait:
 
     def __init__(self, G: np.ndarray, M_causal: int = None, dist: str = 'normal',
                  var_A: float = 1.0, var_Eps: float = 0.0,
-                 var_A_par: float = 0.0, G_par: np.ndarray = None):
+                 var_A_par: float = 0.0, G_par: np.ndarray = None,
+                 FE_X: np.ndarray = None, FE_betas: Union[float, np.ndarray, list] = None,
+                 FE_names: list[str] = None):
         '''
         Initializes and generates a trait from variance components.
         '''
@@ -1161,6 +1187,7 @@ class Trait:
             init_inputs['G_par'] = G_par
         if 'A_par' in self.effects:
             init_inputs['G_par_std'] = self.effects['A_par'].G_std
+        init_inputs.update(self._initialize_fixed_effects(FE_X=FE_X, FE_betas=FE_betas, FE_names=FE_names))
         self.update_inputs(**init_inputs)
         self.generate_trait()
 
@@ -1210,6 +1237,59 @@ class Trait:
             return {key: bool(per_allele.get(key, False)) for key in keys}
         raise ValueError('per_allele must be a bool or a dictionary.')
 
+    @staticmethod
+    def _coerce_fixed_effect_matrix(FE_X: np.ndarray) -> np.ndarray:
+        FE_X = np.asarray(FE_X, dtype=float)
+        if FE_X.ndim == 1:
+            FE_X = FE_X[:, None]
+        elif FE_X.ndim != 2:
+            raise ValueError('FE_X must be a 1D or 2D array.')
+        return FE_X
+
+    @staticmethod
+    def _coerce_fixed_effect_betas(FE_betas: Union[float, np.ndarray, list], C: int) -> np.ndarray:
+        if FE_betas is None:
+            return np.ones(C, dtype=float)
+        FE_betas = np.asarray(FE_betas, dtype=float)
+        if FE_betas.ndim == 0:
+            FE_betas = FE_betas.reshape(1)
+        elif FE_betas.ndim != 1:
+            raise ValueError('FE_betas must be a scalar or 1D array-like object.')
+        if FE_betas.shape[0] != C:
+            raise ValueError('Length of FE_betas must match the number of fixed effects in FE_X.')
+        return FE_betas
+
+    @staticmethod
+    def _coerce_fixed_effect_names(FE_names: list[str], C: int) -> list[str]:
+        if FE_names is None:
+            return [f'FE_{i+1}' for i in range(C)]
+        if len(FE_names) != C:
+            raise ValueError('Length of FE_names must match the number of fixed effects in FE_X.')
+        FE_names = [str(name) for name in FE_names]
+        if len(set(FE_names)) != C:
+            raise ValueError('FE_names must be unique.')
+        invalid = set(FE_names) & {'A', 'A_par', 'Eps'}
+        if invalid:
+            raise ValueError(f'FE_names cannot use reserved effect names: {sorted(invalid)}')
+        return FE_names
+
+    def _initialize_fixed_effects(self, FE_X: np.ndarray = None,
+                                  FE_betas: Union[float, np.ndarray, list] = None,
+                                  FE_names: list[str] = None) -> dict:
+        if FE_X is None:
+            return {}
+
+        FE_X = self._coerce_fixed_effect_matrix(FE_X)
+        C = FE_X.shape[1]
+        FE_betas = self._coerce_fixed_effect_betas(FE_betas, C)
+        FE_names = self._coerce_fixed_effect_names(FE_names, C)
+
+        fixed_inputs = {}
+        for j, name in enumerate(FE_names):
+            self.effects[name] = FixedEffect(name=name, beta=FE_betas[j], input_name=name)
+            fixed_inputs[name] = FE_X[:, j].copy()
+        return fixed_inputs
+
     def _initialize_empty(self):
         self.pop = None
         self.y = np.array([], dtype=float)
@@ -1254,6 +1334,19 @@ class Trait:
                 self.inputs['G_par_std'] = stat.get_G_std_for_effects(G_par, P=int(G_par.max()) if G_par.size > 0 else None)
             N_candidates.append(G_par.shape[0])
 
+        fixed_input_names = {
+            effect.input_name for effect in self.effects.values()
+            if isinstance(effect, FixedEffect)
+        }
+        for input_name in fixed_input_names:
+            if input_name not in self.inputs:
+                continue
+            x = np.asarray(self.inputs[input_name], dtype=float)
+            if x.ndim != 1:
+                raise ValueError(f"Trait input '{input_name}' must be a 1D array.")
+            self.inputs[input_name] = x
+            N_candidates.append(x.shape[0])
+
         if N_candidates:
             N_current = int(N_candidates[0])
             if any(n != N_current for n in N_candidates):
@@ -1283,6 +1376,14 @@ class Trait:
                 new_inputs['G'] = G_dict['A']
             if 'A_par' in G_dict:
                 new_inputs['G_par'] = G_dict['A_par']
+
+        if 'FE_X' in new_inputs:
+            FE_X = self._coerce_fixed_effect_matrix(new_inputs.pop('FE_X'))
+            fixed_effects = [effect for effect in self.effects.values() if isinstance(effect, FixedEffect)]
+            if FE_X.shape[1] != len(fixed_effects):
+                raise ValueError('FE_X has an incompatible number of columns for the trait fixed effects.')
+            for j, effect in enumerate(fixed_effects):
+                new_inputs[effect.input_name] = FE_X[:, j]
 
         self.inputs.update(new_inputs)
         self._refresh_derived_inputs()
@@ -1337,9 +1438,6 @@ class Trait:
         if self.y_ and not np.allclose(self.y, component_sum):
             raise ValueError('Trait.y must equal the sum of Trait.y_ components.')
 
-        invalid = set(self.effects) - self.VALID_EFFECT_COMPONENTS
-        if invalid:
-            raise ValueError(f'Unknown effect names: {sorted(invalid)}')
         for name, effect in self.effects.items():
             if name in self.VALID_GENETIC_COMPONENTS:
                 if not isinstance(effect, GeneticEffect):
@@ -1347,6 +1445,8 @@ class Trait:
             elif name == 'Eps':
                 if not isinstance(effect, NoiseEffect):
                     raise ValueError('effects[Eps] must be a NoiseEffect object.')
+            elif not isinstance(effect, FixedEffect):
+                raise ValueError(f'effects[{name}] must be a GeneticEffect, FixedEffect, or NoiseEffect object.')
             for input_name in effect.required_inputs:
                 if input_name not in self.inputs:
                     raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
@@ -1359,7 +1459,9 @@ class Trait:
     @classmethod
     def from_effects(cls, G: Union[np.ndarray, dict], effects: Union[np.ndarray, dict],
                      per_allele: Union[bool, dict] = False,
-                     var_Eps: float = 0.0, G_par: np.ndarray = None) -> 'Trait':
+                     var_Eps: float = 0.0, G_par: np.ndarray = None,
+                     FE_X: np.ndarray = None, FE_betas: Union[float, np.ndarray, list] = None,
+                     FE_names: list[str] = None) -> 'Trait':
         '''
         Initializes a trait from one or more specified genetic effect arrays.
         '''
@@ -1391,6 +1493,7 @@ class Trait:
         if 'A_par' in G_dict:
             init_inputs['G_par'] = G_dict['A_par']
             init_inputs['G_par_std'] = trait.effects['A_par'].G_std
+        init_inputs.update(trait._initialize_fixed_effects(FE_X=FE_X, FE_betas=FE_betas, FE_names=FE_names))
         trait.update_inputs(**init_inputs)
         trait.generate_trait()
         for name in trait.effects:
@@ -1485,6 +1588,23 @@ class Trait:
 
         component_matrix = np.column_stack(components)
         return component_matrix
+
+    def get_vcov(self, exclude = None, include_y = True,
+                 prettify: bool = True, corr: bool = False,
+                 scale_by_y_var: bool = False) -> np.ndarray:
+        '''
+        Returns the covariance or correlation matrix of the trait components.
+        '''
+        component_matrix = self.get_components_matrix(exclude=exclude, include_y=include_y)
+        vcov = np.corrcoef(component_matrix.T) if corr else np.cov(component_matrix.T)
+        if scale_by_y_var:
+            y_var = self.y.var()
+            if y_var == 0:
+                raise ValueError('Cannot scale by Trait.y variance when Trait.y has zero variance.')
+            vcov = vcov / y_var
+        if prettify:
+            vcov = np.array([[f"{value:.4f}" for value in row] for row in vcov], dtype=object)
+        return vcov
 
     @classmethod
     def concatenate_traits(cls, traits: list, G: np.ndarray = None) -> 'Trait':
