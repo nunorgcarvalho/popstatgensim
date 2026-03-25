@@ -3,3 +3,8 @@ tests/testing*.ipynb
 tests/private/*
 __pycache__/
 *.py[cod]
+build/
+dist/
+*.egg-info/
+*.so
+*.o
