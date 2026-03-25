@@ -401,19 +401,11 @@ def _finalise_output(
     iterations: int,
     converged: bool,
     method: str,
-    trace: str,
 ) -> dict:
     """Package common outputs and derived summary quantities into the public result dict."""
     theta = np.asarray(theta, dtype=float)
     vcov = np.asarray(vcov, dtype=float)
     se = np.sqrt(np.maximum(np.diag(vcov), 0.0))
-    total_var = float(theta.sum())
-    h2 = theta[:-1] / total_var
-    cov_nonresid = vcov[:-1, :-1]
-    h2_vcov = cov_nonresid / (total_var ** 2)
-    h2_se = np.sqrt(np.maximum(np.diag(h2_vcov), 0.0))
-    h2_total = float(h2.sum())
-    se_total_h2 = float(np.sqrt(max(np.ones(len(h2)) @ h2_vcov @ np.ones(len(h2)), 0.0)))
 
     if X is None:
         fixed_effects_se = None
@@ -432,6 +424,7 @@ def _finalise_output(
         "var_components": theta,
         "var_components_se": se,
         "var_components_vcov": vcov,
+        "var_y": phenotype_variance,
         "fixed_effects": beta,
         "fixed_effects_se": fixed_effects_se,
         "fixed_effects_vcov": fixed_effects_vcov,
@@ -439,12 +432,6 @@ def _finalise_output(
         "iterations": iterations,
         "converged": converged,
         "method": method,
-        "trace": trace,
-        "phenotype_variance": phenotype_variance,
-        "h2": h2,
-        "h2_se": h2_se,
-        "h2_total": h2_total,
-        "h2_total_se": se_total_h2,
     }
 
 
@@ -572,7 +559,6 @@ def _run_ai_stochastic(
         iterations=iterations,
         converged=converged,
         method="AI_stochastic",
-        trace="stochastic",
     )
 
 
@@ -649,7 +635,6 @@ def _run_ai_exact(
         iterations=iterations,
         converged=converged,
         method="AI",
-        trace="exact",
     )
 
 
@@ -725,7 +710,6 @@ def _run_reml_em(
         iterations=iterations,
         converged=converged,
         method="EM",
-        trace="exact",
     )
 
 
@@ -816,7 +800,6 @@ def _run_reml_quad_exact(
         iterations=iterations,
         converged=converged,
         method=method,
-        trace="exact",
     )
 
 
@@ -863,11 +846,11 @@ def run_HEreg(
     dict
         Dictionary with the same core fields as ``run_REML``:
         ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``fixed_effects``, ``fixed_effects_se``, ``fixed_effects_vcov``,
-        ``log_likelihood``, ``iterations``, ``converged``, ``method``,
-        ``trace``, ``phenotype_variance``, ``h2``, ``h2_se``, ``h2_total``,
-        and ``h2_total_se``. For HE regression, ``log_likelihood`` is
-        returned as ``None`` and ``iterations`` is always 1.
+        ``var_y``, ``fixed_effects``, ``fixed_effects_se``,
+        ``fixed_effects_vcov``, ``log_likelihood``, ``iterations``,
+        ``converged``, and ``method``. For HE regression,
+        ``log_likelihood`` is returned as ``None`` and ``iterations`` is
+        always 1.
     """
     prepared = _prepare_inputs(y=y, Bs=Bs, Zs=Zs, X=X, std_y=std_y)
     theta, vcov, beta_nonresid = _he_regression_core(
@@ -901,7 +884,6 @@ def run_HEreg(
         iterations=1,
         converged=True,
         method="HE",
-        trace="exact",
     )
     out["fixed_effects_se"] = fixed_effects_se
     out["fixed_effects_vcov"] = fixed_effects_vcov
@@ -978,10 +960,9 @@ def run_REML(
     dict
         Dictionary with keys:
         ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``fixed_effects``, ``fixed_effects_se``, ``fixed_effects_vcov``,
-        ``log_likelihood``, ``iterations``, ``converged``, ``method``,
-        ``trace``, ``phenotype_variance``, ``h2``, ``h2_se``, ``h2_total``,
-        and ``h2_total_se``.
+        ``var_y``, ``fixed_effects``, ``fixed_effects_se``,
+        ``fixed_effects_vcov``, ``log_likelihood``, ``iterations``,
+        ``converged``, and ``method``.
     """
     if method not in {"AI_stochastic", "AI", "EM", "NR", "FS"}:
         raise ValueError("`method` must be one of 'AI_stochastic', 'AI', 'EM', 'NR', or 'FS'.")
