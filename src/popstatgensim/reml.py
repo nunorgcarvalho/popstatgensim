@@ -209,7 +209,7 @@ def _print_iter_message(vars_i: np.ndarray, offsets: np.ndarray, iteration: int,
 def _he_regression_core(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    phenotype_variance: float,
+    residual_variance: float,
     X: np.ndarray | None = None,
     constrain: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -237,7 +237,7 @@ def _he_regression_core(
     # The residual component is the phenotype variance not explained by the
     # random effects estimated from off-diagonal covariance.
     transform = np.vstack([np.eye(len(Vs)), -np.ones((1, len(Vs)))])
-    theta = np.concatenate([beta, [phenotype_variance - beta.sum()]])
+    theta = np.concatenate([beta, [residual_variance - beta.sum()]])
     cov_theta = transform @ cov_beta @ transform.T
     if constrain:
         theta = np.maximum(theta, 0.0)
@@ -247,24 +247,24 @@ def _he_regression_core(
 def _he_warmstart(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    phenotype_variance: float,
+    residual_variance: float,
     X: np.ndarray | None = None,
 ) -> np.ndarray:
     """Generic HE-based warm start used when a fast dense-GRM shortcut is unavailable."""
     theta, _, _ = _he_regression_core(
         y=y,
         Vs=Vs,
-        phenotype_variance=phenotype_variance,
+        residual_variance=residual_variance,
         X=X,
         constrain=True,
     )
     theta = np.asarray(theta, dtype=float)
-    theta = np.maximum(theta, max(phenotype_variance, 1.0) * 1e-3)
+    theta = np.maximum(theta, max(residual_variance, 1.0) * 1e-3)
     total = theta.sum()
     if total <= 0:
-        theta = np.full_like(theta, phenotype_variance / len(theta))
+        theta = np.full_like(theta, residual_variance / len(theta))
     else:
-        theta *= phenotype_variance / total
+        theta *= residual_variance / total
     return theta
 
 
@@ -420,6 +420,22 @@ def _compute_var_y_after_fe(
     return var_after, var_after_se
 
 
+def _compute_fe_ols_summary(
+    y: np.ndarray,
+    X_model: np.ndarray | None,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, float]:
+    """Compute OLS fixed-effect estimates and the residual variance after FE removal."""
+    if X_model is None:
+        return None, None, None, float(y.var())
+
+    beta_full = np.linalg.pinv(X_model) @ y
+    residuals = y - X_model @ beta_full
+    sigma2 = float(residuals @ residuals) / max(X_model.shape[0] - X_model.shape[1], 1)
+    beta_vcov_full = sigma2 * np.linalg.pinv(X_model.T @ X_model)
+    beta_se_full = np.sqrt(np.maximum(np.diag(beta_vcov_full), 0.0))
+    return beta_full, beta_se_full, beta_vcov_full, float(residuals.var())
+
+
 def _finalise_output(
     y: np.ndarray,
     X_user: np.ndarray | None,
@@ -442,9 +458,10 @@ def _finalise_output(
     var_y_sum_comp_se = float(np.sqrt(max(np.ones(len(theta)) @ vcov @ np.ones(len(theta)), 0.0)))
 
     if X_model is None:
+        fixed_effects = None
         fixed_effects_se = None
         fixed_effects_vcov = None
-        fixed_effects = None
+        beta_vcov_for_var = None
     else:
         V = _build_v(Vs, theta)
         try:
@@ -453,39 +470,41 @@ def _finalise_output(
         except linalg.LinAlgError:
             VinvX = np.linalg.pinv(V) @ X_model
         beta_vcov_full = np.linalg.pinv(X_model.T @ VinvX)
-        if X_user is None:
-            fixed_effects = None
-            fixed_effects_vcov = None
-            fixed_effects_se = None
-        else:
-            fixed_effects = beta_model[1:]
-            fixed_effects_vcov = beta_vcov_full[1:, 1:]
-            fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
+        fixed_effects = beta_model
+        fixed_effects_vcov = beta_vcov_full
+        fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
         beta_vcov_for_var = beta_vcov_full
 
-    var_y_after_fe, var_y_after_fe_se = _compute_var_y_after_fe(
+    var_y_after_fe, _ = _compute_var_y_after_fe(
         y=y,
         X_model=X_model,
         beta=beta_model,
-        beta_vcov=None if X_model is None else beta_vcov_for_var,
+        beta_vcov=beta_vcov_for_var,
     )
 
     return {
-        "var_components": theta,
-        "var_components_se": se,
-        "var_components_vcov": vcov,
-        "var_y_before_FE": phenotype_variance,
-        "var_y_after_FE": var_y_after_fe,
-        "var_y_after_FE_se": var_y_after_fe_se,
-        "var_y_sum_comp": var_y_sum_comp,
-        "var_y_sum_comp_se": var_y_sum_comp_se,
-        "fixed_effects": fixed_effects,
-        "fixed_effects_se": fixed_effects_se,
-        "fixed_effects_vcov": fixed_effects_vcov,
+        "var_comps": {
+            "est": theta,
+            "se": se,
+            "vcov": vcov,
+        },
+        "var_y": {
+            "before_FE": phenotype_variance,
+            "after_FE": var_y_after_fe,
+            "sum_comp": var_y_sum_comp,
+            "sum_comp_se": var_y_sum_comp_se,
+        },
+        "fixed_effects": {
+            "est": fixed_effects,
+            "se": fixed_effects_se,
+            "vcov": fixed_effects_vcov,
+        },
+        "algorithm": {
+            "method": method,
+            "iterations": iterations,
+            "converged": converged,
+        },
         "log_likelihood": log_likelihood,
-        "iterations": iterations,
-        "converged": converged,
-        "method": method,
     }
 
 
@@ -892,9 +911,10 @@ def run_HEreg(
         ``N x N`` covariance matrix. If ``Zs`` itself is ``None``, all random
         effects are assumed to be supplied directly as ``N x N`` matrices.
     X : ndarray, shape (N, p), optional
-        Fixed-effect covariate matrix. If provided, the phenotype is first
-        residualized on ``X`` by ordinary least squares before running HE
-        regression.
+        Fixed-effect covariate matrix, not including an intercept column. If
+        provided, an intercept is automatically added internally and the
+        phenotype is first residualized on ``[1 | X]`` by ordinary least
+        squares before running HE regression.
     constrain : bool, default False
         If True, negative component estimates are clipped to zero.
     std_y : bool, default False
@@ -905,43 +925,28 @@ def run_HEreg(
     Returns
     -------
     dict
-        Dictionary with the same core fields as ``run_REML``:
-        ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``var_y_before_FE``, ``var_y_after_FE``, ``var_y_after_FE_se``,
-        ``var_y_sum_comp``, ``var_y_sum_comp_se``, ``fixed_effects``,
-        ``fixed_effects_se``, ``fixed_effects_vcov``, ``log_likelihood``,
-        ``iterations``, ``converged``, and ``method``. For HE regression,
-        ``log_likelihood`` is returned as ``None`` and ``iterations`` is
-        always 1.
+        Nested dictionary with keys:
+        ``var_comps`` containing ``est``, ``se``, and ``vcov``;
+        ``var_y`` containing ``before_FE``, ``after_FE``, ``sum_comp``, and
+        ``sum_comp_se``; ``fixed_effects`` containing ``est``, ``se``, and
+        ``vcov``; ``algorithm`` containing ``method``, ``iterations``, and
+        ``converged``; and ``log_likelihood``. If fixed effects are supplied,
+        the first entry in ``fixed_effects['est']`` is the intercept, followed
+        by the user-supplied covariates. For HE regression, ``log_likelihood``
+        is returned as ``None`` and ``algorithm['iterations']`` is always 1.
     """
     prepared = _prepare_inputs(y=y, Bs=Bs, Zs=Zs, X=X, std_y=std_y)
-    theta, vcov, beta_nonresid = _he_regression_core(
+    beta_full, beta_se_full, beta_vcov_full, residual_variance = _compute_fe_ols_summary(
+        y=prepared.y,
+        X_model=prepared.X_model,
+    )
+    theta, vcov, _ = _he_regression_core(
         y=prepared.y,
         Vs=prepared.Vs,
-        phenotype_variance=prepared.phenotype_variance,
+        residual_variance=residual_variance,
         X=prepared.X_model,
         constrain=constrain,
     )
-
-    if prepared.X_model is None:
-        beta = None
-        fixed_effects_vcov = None
-        fixed_effects_se = None
-    else:
-        beta_full = np.linalg.pinv(prepared.X_model) @ prepared.y
-        residuals = prepared.y - prepared.X_model @ beta_full
-        sigma2 = float(residuals @ residuals) / max(
-            prepared.X_model.shape[0] - prepared.X_model.shape[1], 1
-        )
-        fixed_effects_vcov_full = sigma2 * np.linalg.pinv(prepared.X_model.T @ prepared.X_model)
-        if prepared.X_user is None:
-            beta = None
-            fixed_effects_vcov = None
-            fixed_effects_se = None
-        else:
-            beta = beta_full[1:]
-            fixed_effects_vcov = fixed_effects_vcov_full[1:, 1:]
-            fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
 
     out = _finalise_output(
         y=prepared.y,
@@ -951,15 +956,19 @@ def run_HEreg(
         theta=theta,
         vcov=vcov,
         phenotype_variance=prepared.phenotype_variance,
-        beta_model=beta_full if prepared.X_model is not None else None,
+        beta_model=beta_full,
         log_likelihood=None,
         iterations=1,
         converged=True,
         method="HE",
     )
-    out["fixed_effects_se"] = fixed_effects_se
-    out["fixed_effects_vcov"] = fixed_effects_vcov
-    out["he_nonresid_estimates"] = beta_nonresid
+    if prepared.X_model is not None:
+        out["fixed_effects"]["est"] = beta_full
+        out["fixed_effects"]["se"] = beta_se_full
+        out["fixed_effects"]["vcov"] = beta_vcov_full
+    # HE does not estimate the residual component through likelihood; we report
+    # it on the post-fixed-effect variance scale instead.
+    out["var_comps"]["est"][-1] = residual_variance - np.sum(out["var_comps"]["est"][:-1])
     return out
 
 
@@ -998,8 +1007,9 @@ def run_REML(
         ``N x N`` covariance matrix. If ``Zs`` itself is ``None``, all random
         effects are assumed to be supplied directly as ``N x N`` matrices.
     X : ndarray, shape (N, p), optional
-        Fixed-effect covariate matrix. If provided, REML conditions on these
-        fixed effects when forming the projection matrix.
+        Fixed-effect covariate matrix, not including an intercept column. If
+        provided, REML automatically fits the fixed-effect design ``[1 | X]``
+        internally and conditions on it when forming the projection matrix.
     init : array-like of length M, optional
         Initial values for the non-residual variance components only. The
         residual component is initialized automatically as phenotype variance
@@ -1030,12 +1040,14 @@ def run_REML(
     Returns
     -------
     dict
-        Dictionary with keys:
-        ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``var_y_before_FE``, ``var_y_after_FE``, ``var_y_after_FE_se``,
-        ``var_y_sum_comp``, ``var_y_sum_comp_se``, ``fixed_effects``,
-        ``fixed_effects_se``, ``fixed_effects_vcov``, ``log_likelihood``,
-        ``iterations``, ``converged``, and ``method``.
+        Nested dictionary with keys:
+        ``var_comps`` containing ``est``, ``se``, and ``vcov``;
+        ``var_y`` containing ``before_FE``, ``after_FE``, ``sum_comp``, and
+        ``sum_comp_se``; ``fixed_effects`` containing ``est``, ``se``, and
+        ``vcov``; ``algorithm`` containing ``method``, ``iterations``, and
+        ``converged``; and ``log_likelihood``. If fixed effects are supplied,
+        the first entry in ``fixed_effects['est']`` is the intercept, followed
+        by the user-supplied covariates.
     """
     if method not in {"AI_stochastic", "AI", "EM", "NR", "FS"}:
         raise ValueError("`method` must be one of 'AI_stochastic', 'AI', 'EM', 'NR', or 'FS'.")
