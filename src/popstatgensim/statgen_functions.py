@@ -8,6 +8,7 @@ The functions here contain the documentation for the arguments and return values
 # imports
 import numpy as np
 import matplotlib.pyplot as plt
+import warnings
 from typing import Tuple, Union
 
 ##########################
@@ -39,6 +40,87 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
     elif dist == 'constant':
         causal_effects[j_causal] = np.sqrt(var_G/M_causal)
     return (causal_effects, j_causal)
+
+def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
+                             M: int, M_causal: int = None,
+                             force_var: bool = False,
+                             G: np.ndarray = None, G_std: np.ndarray = None) -> dict:
+    '''
+    Generates paired direct (`A`) and parental (`A_par`) genetic effects on the same causal variants.
+    Effect sizes are drawn jointly from a bivariate normal so that each causal variant has
+    per-standardized-allele covariance matrix:
+        [[var_A / M_causal,     r * sqrt(var_A * var_A_par) / M_causal],
+         [same,                 var_A_par / M_causal]]
+    Parameters:
+        var_A (float): Expected independent-site variance of the direct genetic component.
+        var_A_par (float): Expected independent-site variance of the parental genetic component.
+        r (float): Target correlation between the standardized causal effects for A and A_par.
+        M (int): Total number of variants.
+        M_causal (int): Number of shared causal variants. Default is all variants.
+        force_var (bool): Passed to both returned GeneticEffect objects.
+        G (2D array): Optional genotype matrix used to compute G_std for both effects.
+        G_std (1D array): Optional genotype standard deviations applied to both effects.
+    Returns:
+        effects (dict): Dictionary with keys 'A' and 'A_par', each containing a GeneticEffect object.
+    '''
+    from .popsim import GeneticEffect
+
+    if M_causal is None:
+        M_causal = M
+    if M_causal < 0 or M_causal > M:
+        raise ValueError('M_causal must be between 0 and M.')
+    if abs(r) > 1:
+        raise ValueError('r must be between -1 and 1.')
+    if var_A < 0 or var_A_par < 0:
+        raise ValueError('var_A and var_A_par must be non-negative.')
+    if (var_A == 0 or var_A_par == 0) and not np.isclose(r, 0.0):
+        raise ValueError('r must be 0 when either var_A or var_A_par is 0.')
+
+    if G is not None and G_std is not None:
+        raise ValueError('Provide only one of G or G_std.')
+    if G is not None:
+        G_std = get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
+    elif G_std is not None:
+        G_std = np.asarray(G_std, dtype=float)
+        if G_std.ndim != 1:
+            raise ValueError('G_std must be a 1D array.')
+        if G_std.shape[0] != M:
+            raise ValueError('Length of G_std must match M.')
+
+    effects_A = np.zeros(M, dtype=float)
+    effects_A_par = np.zeros(M, dtype=float)
+
+    if M_causal > 0:
+        j_causal = np.random.choice(M, M_causal, replace=False)
+        cov = np.array([
+            [var_A / M_causal, r * np.sqrt(var_A * var_A_par) / M_causal],
+            [r * np.sqrt(var_A * var_A_par) / M_causal, var_A_par / M_causal],
+        ])
+        draws = np.random.multivariate_normal(mean=np.zeros(2), cov=cov, size=M_causal)
+        effects_A[j_causal] = draws[:, 0]
+        effects_A_par[j_causal] = draws[:, 1]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        effects = {
+            'A': GeneticEffect.from_effects(
+                effects=effects_A,
+                is_standardized=True,
+                name='A',
+                force_var=force_var,
+                var_indep=var_A,
+                G_std=G_std,
+            ),
+            'A_par': GeneticEffect.from_effects(
+                effects=effects_A_par,
+                is_standardized=True,
+                name='A_par',
+                force_var=force_var,
+                var_indep=var_A_par,
+                G_std=G_std,
+            ),
+        }
+    return effects
 
 def compute_genetic_value(G: np.ndarray, effects: np.ndarray) -> np.ndarray:
     '''
