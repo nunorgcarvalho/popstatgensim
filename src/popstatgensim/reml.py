@@ -33,7 +33,8 @@ _WARNED_NO_ACCEL = False
 class _PreparedInputs:
     """Validated and preprocessed model inputs shared across estimators."""
     y: np.ndarray
-    X: np.ndarray | None
+    X_user: np.ndarray | None
+    X_model: np.ndarray | None
     Vs: list[np.ndarray]
     phenotype_variance: float
     n_random: int
@@ -117,9 +118,16 @@ def _prepare_inputs(
             raise ValueError(f"The covariance matrix for component {i + 1} is non-finite.")
         Vs.append(0.5 * (V_i + V_i.T))
 
+    # Match greml_stochastic(): when covariates are provided, include an intercept
+    # automatically in the model matrix used for fitting.
+    X_model = None
+    if X is not None:
+        X_model = np.column_stack([np.ones(n, dtype=float), X])
+
     return _PreparedInputs(
         y=y,
-        X=X,
+        X_user=X,
+        X_model=X_model,
         Vs=Vs,
         phenotype_variance=phenotype_variance,
         n_random=len(Vs),
@@ -389,14 +397,38 @@ def _warn_if_no_accel() -> None:
         _WARNED_NO_ACCEL = True
 
 
+def _compute_var_y_after_fe(
+    y: np.ndarray,
+    X_model: np.ndarray | None,
+    beta: np.ndarray | None,
+    beta_vcov: np.ndarray | None,
+) -> tuple[float, float]:
+    """Compute residualized phenotype variance and its delta-method SE from beta."""
+    if X_model is None or beta is None:
+        return float(y.var()), 0.0
+
+    n = y.shape[0]
+    resid = y - X_model @ beta
+    M = np.eye(n) - np.ones((n, n), dtype=float) / n
+    var_after = float((resid.T @ M @ resid) / n)
+
+    if beta_vcov is None:
+        return var_after, np.nan
+
+    grad = -(2.0 / n) * (X_model.T @ (M @ resid))
+    var_after_se = float(np.sqrt(max(grad @ beta_vcov @ grad, 0.0)))
+    return var_after, var_after_se
+
+
 def _finalise_output(
     y: np.ndarray,
-    X: np.ndarray | None,
+    X_user: np.ndarray | None,
+    X_model: np.ndarray | None,
     Vs: list[np.ndarray],
     theta: np.ndarray,
     vcov: np.ndarray,
     phenotype_variance: float,
-    beta: np.ndarray | None,
+    beta_model: np.ndarray | None,
     log_likelihood: float | None,
     iterations: int,
     converged: bool,
@@ -406,26 +438,48 @@ def _finalise_output(
     theta = np.asarray(theta, dtype=float)
     vcov = np.asarray(vcov, dtype=float)
     se = np.sqrt(np.maximum(np.diag(vcov), 0.0))
+    var_y_sum_comp = float(theta.sum())
+    var_y_sum_comp_se = float(np.sqrt(max(np.ones(len(theta)) @ vcov @ np.ones(len(theta)), 0.0)))
 
-    if X is None:
+    if X_model is None:
         fixed_effects_se = None
         fixed_effects_vcov = None
+        fixed_effects = None
     else:
         V = _build_v(Vs, theta)
         try:
             Lc = cho_factor(V, lower=True, check_finite=False)
-            VinvX = cho_solve(Lc, X, check_finite=False)
+            VinvX = cho_solve(Lc, X_model, check_finite=False)
         except linalg.LinAlgError:
-            VinvX = np.linalg.pinv(V) @ X
-        fixed_effects_vcov = np.linalg.pinv(X.T @ VinvX)
-        fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
+            VinvX = np.linalg.pinv(V) @ X_model
+        beta_vcov_full = np.linalg.pinv(X_model.T @ VinvX)
+        if X_user is None:
+            fixed_effects = None
+            fixed_effects_vcov = None
+            fixed_effects_se = None
+        else:
+            fixed_effects = beta_model[1:]
+            fixed_effects_vcov = beta_vcov_full[1:, 1:]
+            fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
+        beta_vcov_for_var = beta_vcov_full
+
+    var_y_after_fe, var_y_after_fe_se = _compute_var_y_after_fe(
+        y=y,
+        X_model=X_model,
+        beta=beta_model,
+        beta_vcov=None if X_model is None else beta_vcov_for_var,
+    )
 
     return {
         "var_components": theta,
         "var_components_se": se,
         "var_components_vcov": vcov,
-        "var_y": phenotype_variance,
-        "fixed_effects": beta,
+        "var_y_before_FE": phenotype_variance,
+        "var_y_after_FE": var_y_after_fe,
+        "var_y_after_FE_se": var_y_after_fe_se,
+        "var_y_sum_comp": var_y_sum_comp,
+        "var_y_sum_comp_se": var_y_sum_comp_se,
+        "fixed_effects": fixed_effects,
         "fixed_effects_se": fixed_effects_se,
         "fixed_effects_vcov": fixed_effects_vcov,
         "log_likelihood": log_likelihood,
@@ -438,7 +492,8 @@ def _finalise_output(
 def _run_ai_stochastic(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    X: np.ndarray | None,
+    X_user: np.ndarray | None,
+    X_model: np.ndarray | None,
     init: np.ndarray,
     tol: float,
     max_iter: int,
@@ -456,8 +511,7 @@ def _run_ai_stochastic(
     theta = init.astype(np.float64, copy=True)
     Vs_work = [V_i.astype(dtype, copy=False) for V_i in Vs]
     y_work = y.astype(dtype, copy=False)
-    X_work = None if X is None else X.astype(dtype, copy=False)
-    X64 = None if X is None else X.astype(np.float64, copy=False)
+    X_work = None if X_model is None else X_model.astype(dtype, copy=False)
 
     _warn_if_no_accel()
 
@@ -505,7 +559,7 @@ def _run_ai_stochastic(
 
         # Build the exact AI matrix from quadratic forms, just as in fast_greml.
         VinvKPy = cho_solve(Lc, KPy, check_finite=False).astype(np.float64)
-        if X is None:
+        if X_model is None:
             PKPy = VinvKPy
             trace_corr = np.zeros(m + 1, dtype=float)
         else:
@@ -544,17 +598,18 @@ def _run_ai_stochastic(
     # Log-likelihood is only computed once, at the final estimate.
     V_final = _build_v(Vs, theta)
     Lc_final = cho_factor(V_final, lower=True, check_finite=False)
-    beta_last, _, _, _ = _compute_beta_and_py(Lc_final, y, X)
-    ll_last = _compute_loglik(y=y, X=X, beta=beta_last, Lc=Lc_final)
+    beta_last, _, _, _ = _compute_beta_and_py(Lc_final, y, X_model)
+    ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc_final)
     vcov = np.linalg.pinv(AI_last + 1e-12 * np.eye(m + 1))
     return _finalise_output(
         y=y,
-        X=X,
+        X_user=X_user,
+        X_model=X_model,
         Vs=Vs,
         theta=theta,
         vcov=vcov,
         phenotype_variance=phenotype_variance,
-        beta=beta_last,
+        beta_model=beta_last,
         log_likelihood=ll_last,
         iterations=iterations,
         converged=converged,
@@ -565,7 +620,8 @@ def _run_ai_stochastic(
 def _run_ai_exact(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    X: np.ndarray | None,
+    X_user: np.ndarray | None,
+    X_model: np.ndarray | None,
     init: np.ndarray,
     tol: float,
     max_iter: int,
@@ -594,9 +650,9 @@ def _run_ai_exact(
             theta *= 1.05
             continue
 
-        beta_last, VinvX, XVX_inv, Py = _compute_beta_and_py(Lc, y, X)
+        beta_last, VinvX, XVX_inv, Py = _compute_beta_and_py(Lc, y, X_model)
         Vinv = _potri_inverse(Lc)
-        P = _get_projection_matrix(Vinv, X)
+        P = _get_projection_matrix(Vinv, X_model)
         KPy = np.column_stack([V_i @ Py for V_i in Vs] + [Py])
         PKPy = P @ KPy
         AI = 0.5 * (KPy.T @ PKPy)
@@ -611,7 +667,7 @@ def _run_ai_exact(
         grad = 0.5 * (quad - trace_vec)
         theta, offsets = _newton_step(AI, grad, theta, constrain=constrain)
         _print_iter_message(theta, offsets, iteration, verbose)
-        ll_last = _compute_loglik(y=y, X=X, beta=beta_last, Lc=Lc)
+        ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
         if np.max(np.abs(offsets)) < tol and iteration >= 3:
             converged = True
@@ -625,12 +681,13 @@ def _run_ai_exact(
     vcov = np.linalg.pinv(AI_last + 1e-12 * np.eye(m + 1))
     return _finalise_output(
         y=y,
-        X=X,
+        X_user=X_user,
+        X_model=X_model,
         Vs=Vs,
         theta=theta,
         vcov=vcov,
         phenotype_variance=phenotype_variance,
-        beta=beta_last,
+        beta_model=beta_last,
         log_likelihood=ll_last,
         iterations=iterations,
         converged=converged,
@@ -641,7 +698,8 @@ def _run_ai_exact(
 def _run_reml_em(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    X: np.ndarray | None,
+    X_user: np.ndarray | None,
+    X_model: np.ndarray | None,
     init: np.ndarray,
     tol: float,
     max_iter: int,
@@ -667,9 +725,9 @@ def _run_reml_em(
         # EM updates every component using the expected complete-data moments.
         V = _build_v(Vs, theta)
         Lc = cho_factor(V, lower=True, check_finite=False)
-        beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X)
+        beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
-        P = _get_projection_matrix(Vinv, X)
+        P = _get_projection_matrix(Vinv, X_model)
         P_last = P
         offsets = np.zeros(m + 1, dtype=float)
 
@@ -679,7 +737,7 @@ def _run_reml_em(
         if constrain:
             theta = np.maximum(theta, tol / 10)
         _print_iter_message(theta, offsets, iteration, verbose)
-        ll_last = _compute_loglik(y=y, X=X, beta=beta_last, Lc=Lc)
+        ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
         if np.max(np.abs(offsets)) < tol:
             converged = True
@@ -700,12 +758,13 @@ def _run_reml_em(
 
     return _finalise_output(
         y=y,
-        X=X,
+        X_user=X_user,
+        X_model=X_model,
         Vs=Vs,
         theta=theta,
         vcov=vcov,
         phenotype_variance=phenotype_variance,
-        beta=beta_last,
+        beta_model=beta_last,
         log_likelihood=ll_last,
         iterations=iterations,
         converged=converged,
@@ -716,7 +775,8 @@ def _run_reml_em(
 def _run_reml_quad_exact(
     y: np.ndarray,
     Vs: list[np.ndarray],
-    X: np.ndarray | None,
+    X_user: np.ndarray | None,
+    X_model: np.ndarray | None,
     init: np.ndarray,
     method: str,
     tol: float,
@@ -743,9 +803,9 @@ def _run_reml_quad_exact(
         # The quadratic methods share the same score but differ in curvature.
         V = _build_v(Vs, theta)
         Lc = cho_factor(V, lower=True, check_finite=False)
-        beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X)
+        beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
-        P = _get_projection_matrix(Vinv, X)
+        P = _get_projection_matrix(Vinv, X_model)
         P_last = P
 
         score = np.zeros(m + 1, dtype=float)
@@ -776,7 +836,7 @@ def _run_reml_quad_exact(
         if constrain:
             theta = np.maximum(theta, tol / 10)
         _print_iter_message(theta, offsets, iteration, verbose)
-        ll_last = _compute_loglik(y=y, X=X, beta=beta_last, Lc=Lc)
+        ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
         if np.max(np.abs(offsets)) < tol:
             converged = True
@@ -790,12 +850,13 @@ def _run_reml_quad_exact(
     vcov = np.linalg.pinv(curvature_last)
     return _finalise_output(
         y=y,
-        X=X,
+        X_user=X_user,
+        X_model=X_model,
         Vs=Vs,
         theta=theta,
         vcov=vcov,
         phenotype_variance=phenotype_variance,
-        beta=beta_last,
+        beta_model=beta_last,
         log_likelihood=ll_last,
         iterations=iterations,
         converged=converged,
@@ -846,9 +907,10 @@ def run_HEreg(
     dict
         Dictionary with the same core fields as ``run_REML``:
         ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``var_y``, ``fixed_effects``, ``fixed_effects_se``,
-        ``fixed_effects_vcov``, ``log_likelihood``, ``iterations``,
-        ``converged``, and ``method``. For HE regression,
+        ``var_y_before_FE``, ``var_y_after_FE``, ``var_y_after_FE_se``,
+        ``var_y_sum_comp``, ``var_y_sum_comp_se``, ``fixed_effects``,
+        ``fixed_effects_se``, ``fixed_effects_vcov``, ``log_likelihood``,
+        ``iterations``, ``converged``, and ``method``. For HE regression,
         ``log_likelihood`` is returned as ``None`` and ``iterations`` is
         always 1.
     """
@@ -857,29 +919,39 @@ def run_HEreg(
         y=prepared.y,
         Vs=prepared.Vs,
         phenotype_variance=prepared.phenotype_variance,
-        X=prepared.X,
+        X=prepared.X_model,
         constrain=constrain,
     )
 
-    if prepared.X is None:
+    if prepared.X_model is None:
         beta = None
         fixed_effects_vcov = None
         fixed_effects_se = None
     else:
-        beta = np.linalg.pinv(prepared.X) @ prepared.y
-        residuals = prepared.y - prepared.X @ beta
-        sigma2 = float(residuals @ residuals) / max(prepared.X.shape[0] - prepared.X.shape[1], 1)
-        fixed_effects_vcov = sigma2 * np.linalg.pinv(prepared.X.T @ prepared.X)
-        fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
+        beta_full = np.linalg.pinv(prepared.X_model) @ prepared.y
+        residuals = prepared.y - prepared.X_model @ beta_full
+        sigma2 = float(residuals @ residuals) / max(
+            prepared.X_model.shape[0] - prepared.X_model.shape[1], 1
+        )
+        fixed_effects_vcov_full = sigma2 * np.linalg.pinv(prepared.X_model.T @ prepared.X_model)
+        if prepared.X_user is None:
+            beta = None
+            fixed_effects_vcov = None
+            fixed_effects_se = None
+        else:
+            beta = beta_full[1:]
+            fixed_effects_vcov = fixed_effects_vcov_full[1:, 1:]
+            fixed_effects_se = np.sqrt(np.maximum(np.diag(fixed_effects_vcov), 0.0))
 
     out = _finalise_output(
         y=prepared.y,
-        X=prepared.X,
+        X_user=prepared.X_user,
+        X_model=prepared.X_model,
         Vs=prepared.Vs,
         theta=theta,
         vcov=vcov,
         phenotype_variance=prepared.phenotype_variance,
-        beta=beta,
+        beta_model=beta_full if prepared.X_model is not None else None,
         log_likelihood=None,
         iterations=1,
         converged=True,
@@ -960,9 +1032,10 @@ def run_REML(
     dict
         Dictionary with keys:
         ``var_components``, ``var_components_se``, ``var_components_vcov``,
-        ``var_y``, ``fixed_effects``, ``fixed_effects_se``,
-        ``fixed_effects_vcov``, ``log_likelihood``, ``iterations``,
-        ``converged``, and ``method``.
+        ``var_y_before_FE``, ``var_y_after_FE``, ``var_y_after_FE_se``,
+        ``var_y_sum_comp``, ``var_y_sum_comp_se``, ``fixed_effects``,
+        ``fixed_effects_se``, ``fixed_effects_vcov``, ``log_likelihood``,
+        ``iterations``, ``converged``, and ``method``.
     """
     if method not in {"AI_stochastic", "AI", "EM", "NR", "FS"}:
         raise ValueError("`method` must be one of 'AI_stochastic', 'AI', 'EM', 'NR', or 'FS'.")
@@ -973,9 +1046,9 @@ def run_REML(
     prepared = _prepare_inputs(y=y, Bs=Bs, Zs=Zs, X=X, std_y=std_y)
     if init is None:
         y_init = prepared.y
-        if prepared.X is not None:
-            beta_init = np.linalg.pinv(prepared.X) @ prepared.y
-            y_init = prepared.y - prepared.X @ beta_init
+        if prepared.X_model is not None:
+            beta_init = np.linalg.pinv(prepared.X_model) @ prepared.y
+            y_init = prepared.y - prepared.X_model @ beta_init
         # Use the cheaper GREML warm start when the model is already in dense-GRM form.
         if _can_use_fast_grm_warmstart(Bs=Bs, Zs=Zs, Vs=prepared.Vs):
             init_theta = _fast_grm_he_warmstart(
@@ -989,7 +1062,7 @@ def run_REML(
                 y=prepared.y,
                 Vs=prepared.Vs,
                 phenotype_variance=prepared.phenotype_variance,
-                X=prepared.X,
+                X=prepared.X_model,
             )
     else:
         init = np.asarray(init, dtype=float)
@@ -1006,7 +1079,8 @@ def run_REML(
         return _run_ai_stochastic(
             y=prepared.y,
             Vs=prepared.Vs,
-            X=prepared.X,
+            X_user=prepared.X_user,
+            X_model=prepared.X_model,
             init=init_theta,
             tol=tol,
             max_iter=max_iter,
@@ -1021,7 +1095,8 @@ def run_REML(
         return _run_ai_exact(
             y=prepared.y,
             Vs=prepared.Vs,
-            X=prepared.X,
+            X_user=prepared.X_user,
+            X_model=prepared.X_model,
             init=init_theta,
             tol=tol,
             max_iter=max_iter,
@@ -1033,7 +1108,8 @@ def run_REML(
         return _run_reml_em(
             y=prepared.y,
             Vs=prepared.Vs,
-            X=prepared.X,
+            X_user=prepared.X_user,
+            X_model=prepared.X_model,
             init=init_theta,
             tol=tol,
             max_iter=max_iter,
@@ -1044,7 +1120,8 @@ def run_REML(
     return _run_reml_quad_exact(
         y=prepared.y,
         Vs=prepared.Vs,
-        X=prepared.X,
+        X_user=prepared.X_user,
+        X_model=prepared.X_model,
         init=init_theta,
         method=method,
         tol=tol,
