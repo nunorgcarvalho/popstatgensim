@@ -65,21 +65,19 @@ def generate_noise_value(N: int, var_Eps: float = 0.0) -> np.ndarray:
     y_Eps = np.random.normal(loc=0, scale=np.sqrt(var_Eps), size = N)
     return y_Eps
 
-def get_G_std_for_effects(G: np.ndarray, p_min: float = 0.05, P: int = None ) -> np.ndarray:
+def get_G_std_for_effects(G: np.ndarray, p_min: float = 0.05, P: int = 2 ) -> np.ndarray:
     '''
     Computes the standard deviation of each column in the genotype matrix used for converting between per-allele and per-standardized-allele effects. Has safe handling for monomorphic alleles.
     Parameters:
         G (2D array): N*M NON-standardized genotype matrix.
-        p_min (float): Minimum allele frequency to consider an allele polymorphic. Default is 0.05.
-        P (int): Ploidy level. If not specified, it is estimated as the maximum value in G.
+        p_min (float): If a variant is monomorphic in G, its "true" allele frequency is assumed to be this value. Default is 0.05. Setting this to >0 may prevent downstream issues.
+        P (int): Ploidy level. Default is 2.
     Returns:
         G_std (1D array): Array of length M containing the standard deviations of each column in G.
     '''
     # gets observed standard deviation of the genotype matrix
     G_std = G.std(axis=0)
     # if an allele is monomorphic, it uses the standard deviation one would get for a binomial variable with p = p_min
-    if P is None:
-        P = G.max() # estimates ploidy to be the maximum value in G, which may not always be true
     G_std[G_std == 0] = np.sqrt(P * p_min * (1 - p_min)) # sets standard deviation for monomorphic alleles
     return G_std
 
