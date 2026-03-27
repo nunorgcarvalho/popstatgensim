@@ -1547,6 +1547,83 @@ class Trait:
         self._update_initial_variances()
         self.validate()
 
+    def set_force_var(self, force_var: bool,
+                      names: Union[str, list[str]] = None,
+                      force_scale_effects: bool = False):
+        '''
+        Updates `force_var` for one or more GeneticEffect objects and regenerates the trait.
+        If `force_scale_effects` is True, per-allele effects are rescaled so that the
+        unforced genetic component variance in the current generation matches `var_indep`.
+        '''
+        if self.type == 'fixed':
+            raise ValueError('Cannot update force_var for a fixed trait.')
+
+        if names is None:
+            target_names = [name for name, effect in self.effects.items()
+                            if isinstance(effect, GeneticEffect)]
+        elif isinstance(names, str):
+            target_names = [names]
+        else:
+            target_names = list(names)
+
+        if len(target_names) == 0:
+            raise ValueError('No GeneticEffect objects were selected.')
+
+        for name in target_names:
+            if name not in self.effects:
+                raise ValueError(f"Unknown effect name '{name}'.")
+            if not isinstance(self.effects[name], GeneticEffect):
+                raise ValueError(f"Effect '{name}' is not a GeneticEffect.")
+
+        if force_scale_effects:
+            warnings.warn(
+                'force_scale_effects=True rescales per-allele effects for the selected '
+                'GeneticEffect objects; individuals\' trait values may change as a result.'
+            )
+
+        for name in target_names:
+            effect = self.effects[name]
+            effect.refresh_from_inputs(self.inputs)
+
+            if force_scale_effects:
+                if effect.var_indep is None:
+                    raise ValueError(
+                        f"Effect '{name}' must store var_indep when force_scale_effects=True."
+                    )
+                if effect.effects_per_allele is None:
+                    raise ValueError(
+                        f"Effect '{name}' must have per-allele effects defined when force_scale_effects=True."
+                    )
+                if effect.input_name not in self.inputs:
+                    raise ValueError(
+                        f"Trait is missing input '{effect.input_name}' required for effect '{name}'."
+                    )
+
+                G_current = np.asarray(self.inputs[effect.input_name])
+                values_unscaled = stat.compute_genetic_value(G_current, effect.effects_per_allele)
+                current_var = values_unscaled.var()
+                target_var = effect.var_indep
+
+                if np.isclose(current_var, 0.0):
+                    if np.isclose(target_var, 0.0):
+                        effect.effects_per_allele = np.zeros_like(effect.effects_per_allele)
+                    else:
+                        raise ValueError(
+                            f"Cannot rescale zero-variance component for effect '{name}'."
+                        )
+                else:
+                    scale_factor = np.sqrt(target_var / current_var)
+                    effect.effects_per_allele = effect.effects_per_allele * scale_factor
+
+                if effect.g_std_input_name in self.inputs:
+                    effect.update_G_std(G_std=self.inputs[effect.g_std_input_name])
+                else:
+                    effect.update_G_std(G=self.inputs[effect.input_name])
+
+            effect.force_var = bool(force_var)
+
+        self.generate_trait()
+
     def get_h2(self, method: str = 'additive_covariance', force_independence: bool = False) -> float:
         '''
         Returns heritability under one of several definitions.
