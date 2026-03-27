@@ -44,7 +44,8 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
 def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
                              M: int, M_causal: int = None,
                              force_var: bool = False,
-                             G: np.ndarray = None, G_std: np.ndarray = None) -> dict:
+                             G: np.ndarray = None, G_std: np.ndarray = None,
+                             G_par: np.ndarray = None, G_par_std: np.ndarray = None) -> dict:
     '''
     Generates paired direct (`A`) and parental (`A_par`) genetic effects on the same causal variants.
     Effect sizes are drawn jointly from a bivariate normal so that each causal variant has
@@ -58,12 +59,30 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
         M (int): Total number of variants.
         M_causal (int): Number of shared causal variants. Default is all variants.
         force_var (bool): Passed to both returned GeneticEffect objects.
-        G (2D array): Optional genotype matrix used to compute G_std for both effects.
-        G_std (1D array): Optional genotype standard deviations applied to both effects.
+        G (2D array): Optional offspring genotype matrix used to compute G_std for the A effect.
+        G_std (1D array): Optional offspring genotype standard deviations for the A effect.
+        G_par (2D array): Optional parental genotype-sum matrix used to compute G_par_std for the A_par effect.
+        G_par_std (1D array): Optional parental genotype-sum standard deviations for the A_par effect.
+            If only G or G_std is provided, the A_par effect uses sqrt(2) times that offspring
+            standard deviation as an approximation for the larger variance of G_par.
     Returns:
         effects (dict): Dictionary with keys 'A' and 'A_par', each containing a GeneticEffect object.
     '''
     from .popsim import GeneticEffect
+
+    def _resolve_G_std(G_input: np.ndarray, G_std_input: np.ndarray, name: str) -> np.ndarray:
+        if G_input is not None and G_std_input is not None:
+            raise ValueError(f'Provide only one of {name} or {name}_std.')
+        if G_input is not None:
+            return get_G_std_for_effects(G_input, P=int(G_input.max()) if G_input.size > 0 else None)
+        if G_std_input is not None:
+            G_std_output = np.asarray(G_std_input, dtype=float)
+            if G_std_output.ndim != 1:
+                raise ValueError(f'{name}_std must be a 1D array.')
+            if G_std_output.shape[0] != M:
+                raise ValueError(f'Length of {name}_std must match M.')
+            return G_std_output
+        return None
 
     if M_causal is None:
         M_causal = M
@@ -76,16 +95,10 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
     if (var_A == 0 or var_A_par == 0) and not np.isclose(r, 0.0):
         raise ValueError('r must be 0 when either var_A or var_A_par is 0.')
 
-    if G is not None and G_std is not None:
-        raise ValueError('Provide only one of G or G_std.')
-    if G is not None:
-        G_std = get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
-    elif G_std is not None:
-        G_std = np.asarray(G_std, dtype=float)
-        if G_std.ndim != 1:
-            raise ValueError('G_std must be a 1D array.')
-        if G_std.shape[0] != M:
-            raise ValueError('Length of G_std must match M.')
+    G_std_A = _resolve_G_std(G, G_std, 'G')
+    G_std_A_par = _resolve_G_std(G_par, G_par_std, 'G_par')
+    if G_std_A_par is None and G_std_A is not None:
+        G_std_A_par = np.sqrt(2.0) * G_std_A
 
     effects_A = np.zeros(M, dtype=float)
     effects_A_par = np.zeros(M, dtype=float)
@@ -109,7 +122,7 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
                 name='A',
                 force_var=force_var,
                 var_indep=var_A,
-                G_std=G_std,
+                G_std=G_std_A,
             ),
             'A_par': GeneticEffect.from_effects(
                 effects=effects_A_par,
@@ -117,7 +130,7 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
                 name='A_par',
                 force_var=force_var,
                 var_indep=var_A_par,
-                G_std=G_std,
+                G_std=G_std_A_par,
             ),
         }
     return effects

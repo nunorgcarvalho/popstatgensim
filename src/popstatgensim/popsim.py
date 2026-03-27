@@ -99,6 +99,7 @@ class Population:
         self.T_breaks = [self.t] # simulation breaks
         self.traits = {}
         self.BPs = np.arange(self.M) # variant positions in base pairs (BPs)
+        self.G_par = None
         # recombination rates
         if R_type == 'blocks':
             self.R = pop.generate_LD_blocks(self.M)
@@ -181,6 +182,7 @@ class Population:
         if H is not None:
             self.H = H
             self.G = pop.make_G(self.H)
+            self.G_par = None
             self.p = pop.compute_freqs(self.G, self.P)
             self.X = pop.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
         if Haplos is not None:
@@ -365,14 +367,17 @@ class Population:
 
         self.add_trait(name=name, effects=effect_objects, inputs=inputs, var_Eps=var_Eps)
     
-    def add_trait_from_fixed_values(self, name: str, y: np.ndarray):
+    def add_trait_from_fixed_values(self, name: str, y: np.ndarray,
+                                    trait_type: str = 'fixed'):
         '''
         Initializes and generates trait from specified fixed trait values. No sub component or effects (e.g. genetic, random effects) are stored.
         Parameters:
             name (str): Name of trait.
             y (1D array): Trait values for each individual in the population.
+            trait_type (str): Non-regenerating trait type to assign. Must be 'fixed' or
+                'permanent'. Default is 'fixed'.
         '''
-        trait = Trait.from_fixed_values(y)
+        trait = Trait.from_fixed_values(y, trait_type=trait_type)
         trait.pop = self
         self.traits[name] = trait
 
@@ -524,17 +529,26 @@ class Population:
 
         return H
 
-    def simulate_generations(self, generations: int, related_offspring: bool = False,
-                             trait_updates: bool = False, **kwargs):
+    def simulate_generations(self, generations: int = 1, related_offspring: bool = True,
+                             trait_updates: bool = False, verbose: bool = False,
+                             **kwargs):
         '''
         Simulates specified number of generations beyond current generation. Can simulate offspring directly. Automatically updates object. Recombination rates are extracted from object attributes.
 
         Parameters:
-            generations (int): Number of generations to simulate (beyond the current generation).
-            related_offspring (bool): Whether the offspring of the next generation should be directly related to parents from previous generation by simulating meiosis and haplotype transfer. Default is False, meaning that future offspring have haplotypes drawn randomly from allele frequencies.
+            generations (int): Number of generations to simulate (beyond the current generation). Default is 1.
+            related_offspring (bool): Whether the offspring of the next generation should be directly related to parents from previous generation by simulating meiosis and haplotype transfer. Default is True. If false, future offspring have alleles drawn randomly from allele frequencies.
             trait_updates (bool): Whether to update traits after each generation. However, sex is always updated in each generation, regardless of this setting. Default is False, meaning that traits are only updated at the end of the simulation.
+            verbose (bool): Whether to print a progress message after each simulated generation. Default is False.
             **kwargs: All other arguments are passed to the `next_generation` or `generate_offspring` methods. See those methods for details.
         '''
+        am_kwargs = {'AM_r', 'AM_trait', 'AM_type'}
+        if generations > 1 and not trait_updates and any(key in kwargs for key in am_kwargs):
+            raise ValueError(
+                'Assortative mating can only be simulated if traits are updated for each generation. '
+                'Set trait_updates=True when passing AM-related arguments.'
+            )
+
         # preps metrics for new generations
         self._prep_metrics(generations)
         previous_gens = self.metric['p']['values'].shape[0]
@@ -555,6 +569,8 @@ class Population:
                 self.update_traits()
             else:
                 self.update_traits(traits=['sex']) # always updated in each generation
+            if verbose:
+                print(f'Simulated generation {self.t}')
         self.T_breaks.append(previous_gens + generations)
         if not trait_updates:
             self.update_traits()
@@ -653,6 +669,9 @@ class Population:
         Returns an N*M matrix whose (i, j) entry is the *sum* of genotype at variant j
         across individual i's two parents from the previous generation.
         '''
+        if getattr(self, 'G_par', None) is not None:
+            return self.G_par
+
         if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
             raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
         if 'parents' not in self.relations:
@@ -668,7 +687,8 @@ class Population:
         if not np.all(parent_counts == 2):
             raise Exception('Each individual must have exactly two recorded parents to compute `Gpar`.')
 
-        return (parents @ G_prev)
+        self.G_par = parents @ G_prev
+        return self.G_par
 
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
                            mu: Union[float, np.ndarray] = 0,
@@ -1509,10 +1529,12 @@ class Trait:
 
 
     @classmethod
-    def from_fixed_values(cls, y: np.ndarray) -> 'Trait':
+    def from_fixed_values(cls, y: np.ndarray, trait_type: str = 'fixed') -> 'Trait':
         '''
         Initializes a trait from a given array of fixed trait values.
         '''
+        if trait_type not in {'fixed', 'permanent'}:
+            raise ValueError("trait_type must be 'fixed' or 'permanent'.")
         trait = cls.__new__(cls)
         trait._initialize_empty()
         y = np.asarray(y, dtype=float)
@@ -1521,7 +1543,7 @@ class Trait:
         trait.y = y.copy()
         trait.y_ = {'fixed': y.copy()}
         trait.inputs = {'N': y.shape[0]}
-        trait.type = 'fixed'
+        trait.type = trait_type
         trait._update_empirical_variances()
         trait._update_initial_variances()
         trait.validate()
@@ -1531,8 +1553,8 @@ class Trait:
         '''
         Generates or updates trait values from the stored effects and current inputs.
         '''
-        if self.type == 'fixed':
-            raise ValueError('Cannot regenerate a fixed trait from stored effects.')
+        if self.type in {'fixed', 'permanent'}:
+            raise ValueError(f"Cannot regenerate a {self.type} trait from stored effects.")
         if inputs is not None or kwargs:
             self.update_inputs(inputs=inputs, **kwargs)
 
@@ -1555,8 +1577,8 @@ class Trait:
         If `force_scale_effects` is True, per-allele effects are rescaled so that the
         unforced genetic component variance in the current generation matches `var_indep`.
         '''
-        if self.type == 'fixed':
-            raise ValueError('Cannot update force_var for a fixed trait.')
+        if self.type in {'fixed', 'permanent'}:
+            raise ValueError(f"Cannot update force_var for a {self.type} trait.")
 
         if names is None:
             target_names = [name for name, effect in self.effects.items()
@@ -1709,7 +1731,7 @@ class Trait:
         trait_new = cls.__new__(cls)
         trait_new._initialize_empty()
         trait_new.type = first.type
-        if first.type == 'fixed':
+        if first.type in {'fixed', 'permanent'}:
             trait_new.y_ = {
                 name: np.concatenate([trait.y_[name] for trait in traits])
                 for name in first.y_.keys()
@@ -1956,14 +1978,6 @@ class SuperPopulation:
             Haplos = np.concatenate(Haplos_list, axis=0)
         new_pop.Haplos = Haplos
 
-        # adds Trait objects by concatenating them, assumes the first population has all traits
-        for name in gen_pops[0].traits.keys():
-            traits = [pop_i.traits[name] for pop_i in gen_pops]
-            G_par_new = new_pop.get_Gpar() if any('A_par' in trait.effects for trait in traits) else None
-            trait_new = Trait.concatenate_traits(traits, new_pop.G, G_par=G_par_new)
-            trait_new.pop = new_pop
-            new_pop.traits[name] = trait_new
-
         # recursively joins older generations from the same source populations
         joined_prev = None
         if keep_past_generations > 0:
@@ -2030,17 +2044,27 @@ class SuperPopulation:
                                    par_Ped=joined_prev.ped)
             new_pop.ped.construct_paths()
 
+        # adds Trait objects by concatenating them, assumes the first population has all traits
+        for name in gen_pops[0].traits.keys():
+            traits = [pop_i.traits[name] for pop_i in gen_pops]
+            G_par_new = new_pop.get_Gpar() if any('A_par' in trait.effects for trait in traits) else None
+            trait_new = Trait.concatenate_traits(traits, new_pop.G, G_par=G_par_new)
+            trait_new.pop = new_pop
+            new_pop.traits[name] = trait_new
+
         return new_pop
 
-    def join_populations(self, pop_i: list, shared_haplotypes: bool = False,
+    def join_populations(self, pop_i: list = None, shared_haplotypes: bool = False,
                          keep_past_generations: int = 0):
         '''
         Joins multiple populations into a single population. Inactivates the original populations and creates a new population from the merged haplotypes. The new population is added to the superpopulation as an active population.
         Parameters:
-            pop_i (list): List of indices of populations to join.
+            pop_i (list): List of indices of populations to join. If None, joins all active populations.
             shared_haplotypes (bool): Whether haplotype IDs already refer to the same underlying founders across populations. If False, each population's non-negative haplotype IDs are shifted to remain unique after joining. Default is False.
             keep_past_generations (int): Number of previous generations to preserve in the joined population. If greater than 0, the specified populations' stored past generations are recursively joined and attached to the new population's `past` attribute.
         '''
+        if pop_i is None:
+            pop_i = list(self.active_i)
         pops = [self.pops[i] for i in pop_i]
         new_pop = self._join_populations_build(
             pops,
@@ -2150,22 +2174,23 @@ class SuperPopulation:
 
     def add_subpop_trait(self):
         '''
-        Adds a fixed trait named `subpop` to each active population in the superpopulation.
+        Adds a permanent trait named `subpop` to each active population in the superpopulation.
         Each individual in an active population receives the index of that population in
         the superpopulation's `pops` list.
         '''
         for pop_i in self.active_i:
             pop = self.pops[pop_i]
             y = np.full(pop.N, pop_i, dtype=int)
-            pop.add_trait_from_fixed_values(name='subpop', y=y)
+            pop.add_trait_from_fixed_values(name='subpop', y=y, trait_type='permanent')
 
     ####################
     #### Simulating ####
     ####################
-    def simulate_generations(self, **kwargs):
+    def simulate_generations(self, verbose: bool = False, **kwargs):
         '''
         Simulates generations for all active populations in the superpopulation. 
         Parameters:
+            verbose (bool): Whether to print progress messages for each population and generation. Default is False.
             **kwargs: All arguments are passed to the `simulate_generations()` method of each Population object. See that method for details. For each parameter, if a Python list is passed, it is assumed to be a list of arguments for each population in the superpopulation. If a list isn't passed, it is used for all populations.
         '''
         # iterates through each active population
@@ -2175,6 +2200,9 @@ class SuperPopulation:
             pop_kwargs = {}
             # simulates generations for the population using population-specific kwargs
             pop_kwargs = core.get_pop_kwargs(i, **kwargs)
+            pop_kwargs['verbose'] = verbose
+            if verbose:
+                print(f'Simulating population {pop_i}')
             pop.simulate_generations(**pop_kwargs)
 
     #######################
