@@ -1424,6 +1424,13 @@ class Trait:
         new_inputs = {} if inputs is None else copy.deepcopy(inputs)
         new_inputs.update(kwargs)
 
+        # When primary genotype inputs change, invalidate cached genotype SDs so they are
+        # recomputed from the new matrices unless the caller explicitly overrides them.
+        if 'G' in new_inputs and 'G_std' not in new_inputs:
+            self.inputs.pop('G_std', None)
+        if 'G_par' in new_inputs and 'G_par_std' not in new_inputs:
+            self.inputs.pop('G_par_std', None)
+
         self.inputs.update(new_inputs)
         self._refresh_derived_inputs()
 
@@ -1605,7 +1612,8 @@ class Trait:
         return vcov
 
     @classmethod
-    def concatenate_traits(cls, traits: list, G: np.ndarray = None) -> 'Trait':
+    def concatenate_traits(cls, traits: list, G: np.ndarray = None,
+                           G_par: np.ndarray = None) -> 'Trait':
         '''
         Concatenates multiple Trait objects into a single Trait object.
         '''
@@ -1624,28 +1632,68 @@ class Trait:
         trait_new = cls.__new__(cls)
         trait_new._initialize_empty()
         trait_new.type = first.type
-        trait_new.y_ = {
-            name: np.concatenate([trait.y_[name] for trait in traits])
-            for name in first.y_.keys()
-        }
-        trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
-        trait_new._update_empirical_variances()
-        trait_new.var_initial = copy.deepcopy(first.var_initial)
+        if first.type == 'fixed':
+            trait_new.y_ = {
+                name: np.concatenate([trait.y_[name] for trait in traits])
+                for name in first.y_.keys()
+            }
+            trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
+            trait_new._update_empirical_variances()
+            trait_new.var_initial = copy.deepcopy(first.var_initial)
+            trait_new.inputs = {'N': sum(int(trait.inputs['N']) for trait in traits)}
+            trait_new.validate()
+            return trait_new
+
         trait_new.effects = copy.deepcopy(first.effects)
         if any(isinstance(effect, GeneticEffect) for effect in trait_new.effects.values()) and len(traits) > 1:
             warnings.warn('Using the effects objects from the first trait when concatenating traits.')
+        if any(isinstance(effect, GeneticEffect) and effect.force_var
+               for effect in trait_new.effects.values()):
+            warnings.warn(
+                'Joining traits with GeneticEffect(force_var=True) will change genetic component '
+                'values because the joined population triggers a new variance-matching rescaling, '
+                'even though per-allele effects remain unchanged.'
+            )
+        if any(isinstance(effect, FixedEffect) and effect.var is not None
+               for effect in trait_new.effects.values()):
+            warnings.warn(
+                'Joining traits with FixedEffect(var=...) may change fixed-effect values because '
+                'differences in fixed-effect input variance across subpopulations affect rescaling. '
+                'To preserve values exactly across joins, define fixed effects using beta only.'
+            )
 
         trait_new.inputs = {'N': sum(int(trait.inputs['N']) for trait in traits)}
         shared_input_keys = set.intersection(*[set(trait.inputs.keys()) for trait in traits])
         for key in shared_input_keys - {'N'} - cls.DERIVED_INPUTS:
             values = [trait.inputs[key] for trait in traits]
             first_value = values[0]
+            if key == 'G' and G is not None:
+                trait_new.inputs['G'] = np.asarray(G)
+                continue
+            if key == 'G_par' and G_par is not None:
+                trait_new.inputs['G_par'] = np.asarray(G_par)
+                continue
             if isinstance(first_value, np.ndarray) and first_value.ndim >= 1 and first_value.shape[0] == int(traits[0].inputs['N']):
                 trait_new.inputs[key] = np.concatenate(values, axis=0)
             else:
                 trait_new.inputs[key] = copy.deepcopy(first_value)
+
+        if 'A' in trait_new.effects and G is not None:
+            trait_new.inputs['G'] = np.asarray(G)
+        if 'A_par' in trait_new.effects and G_par is not None:
+            trait_new.inputs['G_par'] = np.asarray(G_par)
         trait_new._refresh_derived_inputs()
 
+        trait_new.y_ = {}
+        for name, effect in trait_new.effects.items():
+            if isinstance(effect, NoiseEffect):
+                trait_new.y_[name] = np.concatenate([trait.y_[name] for trait in traits])
+                continue
+            effect.refresh_from_inputs(trait_new.inputs)
+            trait_new.y_[name] = effect.generate_component(trait_new.inputs)
+
+        trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
+        trait_new._update_empirical_variances()
         trait_new._update_initial_variances()
         trait_new.validate()
         return trait_new
@@ -1834,7 +1882,8 @@ class SuperPopulation:
         # adds Trait objects by concatenating them, assumes the first population has all traits
         for name in gen_pops[0].traits.keys():
             traits = [pop_i.traits[name] for pop_i in gen_pops]
-            trait_new = Trait.concatenate_traits(traits, new_pop.G)
+            G_par_new = new_pop.get_Gpar() if any('A_par' in trait.effects for trait in traits) else None
+            trait_new = Trait.concatenate_traits(traits, new_pop.G, G_par=G_par_new)
             trait_new.pop = new_pop
             new_pop.traits[name] = trait_new
 
@@ -1996,50 +2045,31 @@ class SuperPopulation:
     ################
     #### Traits ####
     ################
-    def add_trait(self, name: str, per_allele_p_pop: int = None, **kwargs):
+    def add_trait(self, name: str, **kwargs):
         '''
         Adds a trait to all active populations in the superpopulation.
         Parameters:
             name (str): Name of the trait to add.
-            per_allele_p_pop (int): The index of the population from which to pull allele frequencies in order to generate per-allele effect sizes. The method first generates standardized per-allele effects, but for biological realism, effects are fixed across populations by scaling them to be per-allele effect sizes. This requires having a set of allele frequencies (or more precisely, genotype standard deviations) to scale effects by, which can be extracted from the specified population index. If not provided (Default), the method will join the active populations together and get the standard deviation of the genotype matrix across them.
-            **kwargs: All arguments are analogous to the `Trait` constructor method. See that method for details. However, the per-allele genetic effects are shared across all populations. For each parameter except `var_G` and `M_causal`, if a Python list is passed, it is assumed to be a list of arguments for each population in the superpopulation. If a list isn't passed, it is used for all populations.
+            **kwargs: Arguments analogous to `Population.add_trait()`. The same `effects`
+                dictionary is passed to each active population. For other keyword arguments,
+                if a Python list is passed, it is assumed to contain one entry per active
+                population; otherwise the same value is used for all active populations.
         '''
-        # generates genetic effects
-        M = self.pops[0].M  # assumes all populations have the same number of variants
-        M_causal = kwargs.get('M_causal', M)
-        var_G = kwargs.get('var_G', 1.0)
-        effects, _ = stat.generate_causal_effects(M, M_causal, var_G)
-        if per_allele_p_pop is not None:
-            # gets standard deviation of genotype matrix from specified population
-            G_std = stat.get_G_std_for_effects(self.pops[per_allele_p_pop].G)
-        else:
-            # gets average standard deviation of genotype matrix across all active populations
-            G_std = np.mean([stat.get_G_std_for_effects(pop.G) for pop, is_active
-                             in zip(self.pops, self.active) if is_active], axis=0)
-        
-        effects_per_allele = stat.get_standardized_effects(effects, G_std, std2allelic=True)
+        effects = kwargs.pop('effects', None)
+        if effects is None:
+            raise ValueError('SuperPopulation.add_trait requires an effects dictionary.')
 
-        # iterates through each active population
+        for effect_name, effect in effects.items():
+            if isinstance(effect, GeneticEffect) and effect.G_std is None and not effect.force_var:
+                warnings.warn(
+                    f"Genetic effect {effect_name} has no stored G_std and force_var=False; "
+                    "per-allele effects across subpopulations may differ, while standardized effects will be identical."
+                )
+
         for i, pop_i in enumerate(self.active_i):
             pop = self.pops[pop_i]
             pop_kwargs = core.get_pop_kwargs(i, **kwargs)
-            force_var = pop_kwargs.pop('force_var', False)
-            pop_kwargs.pop('var_G', None)
-            pop_kwargs.pop('M_causal', None)
-            var_Eps = pop_kwargs.pop('var_Eps', None)
-            inputs = copy.deepcopy(pop_kwargs.pop('inputs', {}))
-            inputs.setdefault('G', pop.G)
-
-            effect_objects = {
-                'A': GeneticEffect.from_effects(
-                    effects=effects_per_allele,
-                    is_standardized=False,
-                    name='A',
-                    force_var=force_var,
-                    var_indep=var_G,
-                )
-            }
-            pop.add_trait(name=name, effects=effect_objects, inputs=inputs, var_Eps=var_Eps)
+            pop.add_trait(name=name, effects=effects, **pop_kwargs)
 
     def add_subpop_trait(self):
         '''

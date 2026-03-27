@@ -304,9 +304,9 @@ def draw_p_FST(FST: float, p0: np.ndarray, dist: str = 'beta') -> np.ndarray:
 
     p = p0.copy()
     polymorphic_mask = (p0 > 0) & (p0 < 1)
-    alpha = p0[polymorphic_mask] * (1 - FST) / FST
-    beta = (1 - p0[polymorphic_mask]) * (1 - FST) / FST
-    p[polymorphic_mask] = np.random.beta(alpha, beta)
+    param1 = p0[polymorphic_mask] * (1 - FST) / FST
+    param2 = (1 - p0[polymorphic_mask]) * (1 - FST) / FST
+    p[polymorphic_mask] = np.random.beta(param1, param2)
     return p
 
 ########################################
