@@ -315,8 +315,7 @@ class Population:
         if any(name_i == 'A_par' for name_i in effects) and 'G_par' not in inputs:
             inputs['G_par'] = self.get_Gpar()
 
-        trait = Trait(inputs=inputs, **kwargs)
-        trait.pop = self
+        trait = Trait(inputs=inputs, pop=self, name=name, **kwargs)
         self.traits[name] = trait
     
     def add_trait_from_effects(self, name: str, **kwargs):
@@ -377,8 +376,7 @@ class Population:
             trait_type (str): Non-regenerating trait type to assign. Must be 'fixed' or
                 'permanent'. Default is 'fixed'.
         '''
-        trait = Trait.from_fixed_values(y, trait_type=trait_type)
-        trait.pop = self
+        trait = Trait.from_fixed_values(y, trait_type=trait_type, pop=self, name=name)
         self.traits[name] = trait
 
     def update_traits(self, traits: list = None):
@@ -1058,7 +1056,7 @@ class Effect:
         '''
         return None
 
-    def generate_component(self, inputs: dict) -> np.ndarray:
+    def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Generates realized values for this component from the provided inputs.
         '''
@@ -1240,7 +1238,7 @@ class GeneticEffect(Effect):
                 f"Missing required input '{self.g_std_input_name}' or '{self.input_name}' for effect {self.name}."
             )
 
-    def generate_component(self, inputs: dict) -> np.ndarray:
+    def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Computes realized genetic values from the current genotype input.
         '''
@@ -1274,7 +1272,7 @@ class FixedEffect(Effect):
     '''
 
     def __init__(self, name: str, beta: float = None, var: float = None,
-                 input_name: str = None):
+                 input_name: str = None, is_trait: bool = False):
         super().__init__(name)
         if beta is None and var is None:
             beta = 1.0
@@ -1283,15 +1281,27 @@ class FixedEffect(Effect):
         self.beta = None if beta is None else float(beta)
         self.var = None if var is None else float(var)
         self.input_name = name if input_name is None else input_name
-        self.required_inputs = (self.input_name,)
+        self.is_trait = bool(is_trait)
+        self.required_inputs = () if self.is_trait else (self.input_name,)
 
-    def generate_component(self, inputs: dict) -> np.ndarray:
+    def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Computes realized fixed-effect values from the current covariate input.
         '''
-        if self.input_name not in inputs:
-            raise ValueError(f"Missing required input '{self.input_name}' for effect {self.name}.")
-        x = np.asarray(inputs[self.input_name], dtype=float)
+        if self.is_trait:
+            if pop is None:
+                raise ValueError(
+                    f"Fixed effect {self.name} requires a Population object when is_trait=True."
+                )
+            if self.input_name not in pop.traits:
+                raise ValueError(
+                    f"Trait '{self.input_name}' was not found in the population for fixed effect {self.name}."
+                )
+            x = np.asarray(pop.traits[self.input_name].y, dtype=float)
+        else:
+            if self.input_name not in inputs:
+                raise ValueError(f"Missing required input '{self.input_name}' for effect {self.name}.")
+            x = np.asarray(inputs[self.input_name], dtype=float)
         if x.ndim != 1:
             raise ValueError(f"Input '{self.input_name}' must be a 1D array.")
         values = x if self.beta is None else self.beta * x
@@ -1320,7 +1330,7 @@ class NoiseEffect(Effect):
         self.var = var
         self.force_var = bool(force_var)
 
-    def generate_component(self, inputs: dict) -> np.ndarray:
+    def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Generates realized noise values for N individuals.
         '''
@@ -1345,11 +1355,14 @@ class Trait:
     VALID_GENETIC_COMPONENTS = {'A', 'A_par'}
     DERIVED_INPUTS = {'G_std', 'G_par_std'}
 
-    def __init__(self, effects: dict, inputs: dict, var_Eps: float = None):
+    def __init__(self, effects: dict, inputs: dict, var_Eps: float = None,
+                 pop: Population = None, name: str = None):
         '''
         Initializes and generates a trait from pre-defined effect objects.
         '''
         self._initialize_empty()
+        self.pop = pop
+        self.name = name
         if not isinstance(effects, dict) or len(effects) == 0:
             raise ValueError('effects must be a non-empty dictionary of Effect objects.')
         if not isinstance(inputs, dict):
@@ -1370,6 +1383,7 @@ class Trait:
 
     def _initialize_empty(self):
         self.pop = None
+        self.name = None
         self.y = np.array([], dtype=float)
         self.y_ = {}
         self.var = {}
@@ -1414,7 +1428,7 @@ class Trait:
 
         fixed_input_names = {
             effect.input_name for effect in self.effects.values()
-            if isinstance(effect, FixedEffect)
+            if isinstance(effect, FixedEffect) and not effect.is_trait
         }
         for input_name in fixed_input_names:
             if input_name not in self.inputs:
@@ -1524,12 +1538,32 @@ class Trait:
             for input_name in effect.required_inputs:
                 if input_name not in self.inputs:
                     raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
+            if isinstance(effect, FixedEffect) and effect.is_trait and self.pop is not None:
+                if effect.input_name not in self.pop.traits:
+                    raise ValueError(
+                        f"Trait-backed fixed effect '{name}' requires population trait "
+                        f"'{effect.input_name}', but it was not found."
+                    )
+                trait_names = list(self.pop.traits.keys())
+                current_name = self.name
+                if current_name is None:
+                    for trait_name, trait_obj in self.pop.traits.items():
+                        if trait_obj is self:
+                            current_name = trait_name
+                            break
+                if current_name in trait_names:
+                    if trait_names.index(effect.input_name) >= trait_names.index(current_name):
+                        raise ValueError(
+                            f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
+                            f"must depend on an earlier trait; got '{effect.input_name}'."
+                        )
             if name not in self.y_:
                 raise ValueError(f'Missing realized component for effect {name}.')
 
 
     @classmethod
-    def from_fixed_values(cls, y: np.ndarray, trait_type: str = 'fixed') -> 'Trait':
+    def from_fixed_values(cls, y: np.ndarray, trait_type: str = 'fixed',
+                          pop: Population = None, name: str = None) -> 'Trait':
         '''
         Initializes a trait from a given array of fixed trait values.
         '''
@@ -1537,6 +1571,8 @@ class Trait:
             raise ValueError("trait_type must be 'fixed' or 'permanent'.")
         trait = cls.__new__(cls)
         trait._initialize_empty()
+        trait.pop = pop
+        trait.name = name
         y = np.asarray(y, dtype=float)
         if y.ndim != 1:
             raise ValueError('y must be a 1D array.')
@@ -1561,7 +1597,7 @@ class Trait:
         self.y_ = {}
         for name, effect in self.effects.items():
             effect.refresh_from_inputs(self.inputs)
-            self.y_[name] = effect.generate_component(self.inputs)
+            self.y_[name] = effect.generate_component(self.inputs, pop=self.pop)
 
         self.y = np.sum(np.column_stack(list(self.y_.values())), axis=1)
         self.type = 'composite'
@@ -1712,7 +1748,8 @@ class Trait:
 
     @classmethod
     def concatenate_traits(cls, traits: list, G: np.ndarray = None,
-                           G_par: np.ndarray = None) -> 'Trait':
+                           G_par: np.ndarray = None, pop: Population = None,
+                           name: str = None) -> 'Trait':
         '''
         Concatenates multiple Trait objects into a single Trait object.
         '''
@@ -1730,6 +1767,8 @@ class Trait:
 
         trait_new = cls.__new__(cls)
         trait_new._initialize_empty()
+        trait_new.pop = pop
+        trait_new.name = name
         trait_new.type = first.type
         if first.type in {'fixed', 'permanent'}:
             trait_new.y_ = {
@@ -1789,7 +1828,7 @@ class Trait:
                 trait_new.y_[name] = np.concatenate([trait.y_[name] for trait in traits])
                 continue
             effect.refresh_from_inputs(trait_new.inputs)
-            trait_new.y_[name] = effect.generate_component(trait_new.inputs)
+            trait_new.y_[name] = effect.generate_component(trait_new.inputs, pop=trait_new.pop)
 
         trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
         trait_new._update_empirical_variances()
@@ -1805,6 +1844,8 @@ class Trait:
         self.validate()
         trait_new = self.__class__.__new__(self.__class__)
         trait_new._initialize_empty()
+        trait_new.pop = self.pop
+        trait_new.name = self.name
         trait_new.type = self.type
         trait_new.y = self.y[i_keep].copy()
         trait_new.y_ = {
@@ -2048,8 +2089,9 @@ class SuperPopulation:
         for name in gen_pops[0].traits.keys():
             traits = [pop_i.traits[name] for pop_i in gen_pops]
             G_par_new = new_pop.get_Gpar() if any('A_par' in trait.effects for trait in traits) else None
-            trait_new = Trait.concatenate_traits(traits, new_pop.G, G_par=G_par_new)
-            trait_new.pop = new_pop
+            trait_new = Trait.concatenate_traits(
+                traits, new_pop.G, G_par=G_par_new, pop=new_pop, name=name
+            )
             new_pop.traits[name] = trait_new
 
         return new_pop
@@ -2114,6 +2156,8 @@ class SuperPopulation:
             for name, trait in source.traits.items():
                 trait_new = trait.index_trait(i_new, source.G, G_already_indexed=False)
                 trait_new.pop = new_pop
+                trait_new.name = name
+                trait_new.validate()
                 new_pop.traits[name] = trait_new
             
             new_pops.append( new_pop )
