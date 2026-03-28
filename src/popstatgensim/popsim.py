@@ -2088,7 +2088,12 @@ class SuperPopulation:
         # adds Trait objects by concatenating them, assumes the first population has all traits
         for name in gen_pops[0].traits.keys():
             traits = [pop_i.traits[name] for pop_i in gen_pops]
-            G_par_new = new_pop.get_Gpar() if any('A_par' in trait.effects for trait in traits) else None
+            has_A_par = any('A_par' in trait.effects for trait in traits)
+            can_compute_G_par = (
+                has_A_par and new_pop.past is not None and len(new_pop.past) >= 2
+                and new_pop.past[1] is not None and 'parents' in new_pop.relations
+            )
+            G_par_new = new_pop.get_Gpar() if can_compute_G_par else None
             trait_new = Trait.concatenate_traits(
                 traits, new_pop.G, G_par=G_par_new, pop=new_pop, name=name
             )
