@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 from typing import Tuple, Union, Dict, Optional, List
 from dataclasses import dataclass
 from scipy import sparse
-from scipy.linalg import block_diag
 import copy
 import inspect
 import warnings
@@ -39,6 +38,9 @@ class Population:
                  R_type: str = 'blocks',
                  keep_past_generations: int = 1,
                  track_pedigree: bool = False,
+                 track_haplotypes: bool = False,
+                 metric_retention: str = 'store_every',
+                 metric_last_k: int = None,
                  seed: int = None):
         '''
         Initializes a population, simulating initial genotypes from specified allele frequencies.
@@ -50,6 +52,9 @@ class Population:
             R_type (str). Type of recombination rates to use for genome. Options are: 'blocks' (default) for LD blocks (see pop.generate_LD_blocks()), 'indep' for independent sites (see self.make_sites_indep()), or 'uniform' for uniform recombination rates across genome (see pop.generate_chromosomes()). Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
+            track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
+            metric_retention (str): How metric histories are retained over time. Options are 'store_every', 'store_last_k', 'summary_only', and 'disabled'. Default is 'store_every'.
+            metric_last_k (int): Number of most recent generations to retain when `metric_retention='store_last_k'`.
             seed (int): Initial seed to use when simulating genotypes (and allele frequencies if necessary).
         '''
         # sets seed if specified
@@ -67,10 +72,23 @@ class Population:
         H = pop.draw_binom_haplos(p_init, N, P)
 
         # passes haplotype to base constructor for further initialization
-        self._initialize_H(H, R_type=R_type, keep_past_generations=keep_past_generations, track_pedigree=track_pedigree)
+        self._initialize_H(
+            H,
+            R_type=R_type,
+            keep_past_generations=keep_past_generations,
+            track_pedigree=track_pedigree,
+            track_haplotypes=track_haplotypes,
+            metric_retention=metric_retention,
+            metric_last_k=metric_last_k,
+        )
     
     @classmethod
-    def from_H(cls, H: np.ndarray, R_type: str = 'blocks', keep_past_generations: int = 1, track_pedigree: bool = False):
+    def from_H(cls, H: np.ndarray, R_type: str = 'blocks',
+               keep_past_generations: int = 1,
+               track_pedigree: bool = False,
+               track_haplotypes: bool = False,
+               metric_retention: str = 'store_every',
+               metric_last_k: int = None):
         '''
         Initializes a population from a given haplotype array.
         Parameters:
@@ -78,16 +96,32 @@ class Population:
             R_type (str). Type of recombination rates to use for genome. Options are: 'blocks' (default) for LD blocks (see pop.generate_LD_blocks()), 'indep' for independent sites (see self.make_sites_indep()), or 'uniform' for uniform recombination rates across genome (see pop.generate_chromosomes()). Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
+            track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
+            metric_retention (str): Metric retention policy. See `Population.__init__()`.
+            metric_last_k (int): Number of retained generations when `metric_retention='store_last_k'`.
         Returns:
             Population: A new Population object initialized with the given haplotype array.
         '''
         # creates new instance of class
         pop = cls.__new__(cls)
         # initializes the object with the given haplotype array
-        pop._initialize_H(H, R_type=R_type, keep_past_generations=keep_past_generations, track_pedigree=track_pedigree)
+        pop._initialize_H(
+            H,
+            R_type=R_type,
+            keep_past_generations=keep_past_generations,
+            track_pedigree=track_pedigree,
+            track_haplotypes=track_haplotypes,
+            metric_retention=metric_retention,
+            metric_last_k=metric_last_k,
+        )
         return pop
 
-    def _initialize_H(self, H: np.ndarray, R_type: str = 'blocks', keep_past_generations: int = 1, track_pedigree: bool = False):
+    def _initialize_H(self, H: np.ndarray, R_type: str = 'blocks',
+                      keep_past_generations: int = 1,
+                      track_pedigree: bool = False,
+                      track_haplotypes: bool = False,
+                      metric_retention: str = 'store_every',
+                      metric_last_k: int = None):
         '''
         Initializes a population from a given haplotype array. See the `from_H` class method for details.
         '''
@@ -100,6 +134,10 @@ class Population:
         self.traits = {}
         self.BPs = np.arange(self.M) # variant positions in base pairs (BPs)
         self.G_par = None
+        self._X = None
+        self._G_std = None
+        self._G_par_std = None
+        self._X_dtype = np.float32
         # recombination rates
         if R_type == 'blocks':
             self.R = pop.generate_LD_blocks(self.M)
@@ -109,10 +147,15 @@ class Population:
             self.R = pop.generate_chromosomes(self.M, chrs=1, meioses_per_chr=1)
         self.K = np.diag(np.ones(self.N)) # kinship matrix (initially identity, not functional yet)
         self.track_pedigree = track_pedigree # whether to track pedigree information
+        self.track_haplotypes = bool(track_haplotypes)
+        self.metric_retention = metric_retention
+        self.metric_last_k = metric_last_k
         # how many past generations to keep in memory
         self.past = [self]
         self.update_keep_past_gens(keep_past_generations=keep_past_generations)
-        Haplos = np.full_like(H, -1, dtype=int) # initializes haplotype ID array with -1s
+        Haplos = None
+        if self.track_haplotypes:
+            Haplos = np.full(H.shape, -1, dtype=np.int32)
 
         # further attributes
         self._update_obj(H=H, Haplos=Haplos, update_past=False)
@@ -154,9 +197,62 @@ class Population:
         '''
         Generates a complementary haplotype array for each individual containing a haplotype identifier for each allele. This functions treats the current generation as founders (individuals are unrelated from each other) such that each of their chromosomes has a unique identifier for all alleles in it. Subsequent generations can then track the inheritance of these founding haplotypes. Haplotypes are given an integer in the order they appear in the haplotype array.
         '''
+        self.track_haplotypes = True
         ids = np.arange(self.N * self.P, dtype=np.int32).reshape(self.N, self.P)
         Haplos = np.broadcast_to(ids[:, None, :], self.H.shape).copy()
         self._update_obj(Haplos=Haplos)
+
+    @property
+    def X(self) -> np.ndarray:
+        '''
+        Lazily computes and caches the standardized genotype matrix.
+        '''
+        if self._X is None:
+            X = pop.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
+            self._X = np.asarray(X, dtype=self._X_dtype)
+        return self._X
+
+    @X.setter
+    def X(self, value: np.ndarray):
+        if value is None:
+            self._X = None
+        else:
+            self._X = np.asarray(value, dtype=self._X_dtype)
+
+    def _require_haplotype_tracking(self):
+        if not self.track_haplotypes or self.Haplos is None:
+            raise ValueError(
+                'Haplotype IDs are not stored for this population. '
+                'Initialize with track_haplotypes=True or call set_founding_haplotypes().'
+            )
+
+    def get_relation_matrix(self, relation: str, dtype: np.dtype = np.uint8) -> np.ndarray:
+        '''
+        Returns a dense matrix representation of one stored relation.
+        '''
+        return pop.get_relation_matrix(self.relations, relation, self.N, dtype=dtype)
+
+    def get_G_std(self) -> np.ndarray:
+        '''
+        Returns cached genotype standard deviations for the current generation.
+        '''
+        if self._G_std is None:
+            self._G_std = np.asarray(stat.get_G_std_for_effects(self.G, P=self.P), dtype=np.float32)
+        return self._G_std
+
+    def get_Gpar_std(self, G_par: np.ndarray = None) -> np.ndarray:
+        '''
+        Returns cached parental-genotype standard deviations for the current generation.
+        '''
+        if G_par is None:
+            if self._G_par_std is None:
+                G_par = self.get_Gpar()
+                self._G_par_std = np.asarray(
+                    stat.get_G_std_for_effects(G_par, P=2 * self.P),
+                    dtype=np.float32,
+                )
+            return self._G_par_std
+        return np.asarray(stat.get_G_std_for_effects(G_par, P=2 * self.P), dtype=np.float32)
 
 
     ###################################
@@ -183,10 +279,14 @@ class Population:
             self.H = H
             self.G = pop.make_G(self.H)
             self.G_par = None
+            self._G_std = None
+            self._G_par_std = None
             self.p = pop.compute_freqs(self.G, self.P)
-            self.X = pop.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
+            self.X = None
         if Haplos is not None:
             self.Haplos = Haplos
+        elif not self.track_haplotypes:
+            self.Haplos = None
         if relations is not None:
             self._update_relations(relations)
         if update_pedigree and update_past:
@@ -218,7 +318,7 @@ class Population:
             if key == 'spouses':
                 if self.keep_past_generations >= 1:
                     self.past[1].relations['spouses'] = relations['spouses'] # updates prior spouse matrix for past gen
-                self.relations['spouses'] = np.zeros((self.N, self.N), dtype=np.uint8) # resets spouses relationship matrix for current gen
+                self.relations['spouses'] = np.full(self.N, -1, dtype=np.int32)
             else:
                 self.relations[key] = relations[key] # sets other relationship matrices for current generation
 
@@ -229,7 +329,7 @@ class Population:
         if self.keep_past_generations < 1:
             raise Exception('Must keep at least 1 past generation to track pedigree.')
         # makes new Pedigree object from scratch, and adds parent infices and Pedigree pointer
-        self.ped = Pedigree(self.N, par_idx = self.relations['par_idx'], par_Ped = self.past[1].ped)
+        self.ped = Pedigree(self.N, par_idx=self.relations['parents'], par_Ped=self.past[1].ped)
         # fills out the relationship matrix
         self.ped.construct_paths()
 
@@ -312,8 +412,10 @@ class Population:
 
         if any(name_i == 'A' for name_i in effects) and 'G' not in inputs:
             inputs['G'] = self.G
+            inputs['G_std'] = self.get_G_std()
         if any(name_i == 'A_par' for name_i in effects) and 'G_par' not in inputs:
             inputs['G_par'] = self.get_Gpar()
+            inputs['G_par_std'] = self.get_Gpar_std(inputs['G_par'])
 
         trait = Trait(inputs=inputs, pop=self, name=name, **kwargs)
         self.traits[name] = trait
@@ -394,10 +496,12 @@ class Population:
                 continue
             trait = self.traits[key]
             if trait.type == 'composite':
-                trait_inputs = {'G': self.G}
+                trait_inputs = {'G': self.G, 'G_std': self.get_G_std()}
                 if 'A_par' in trait.effects:
-                    trait_inputs['G_par'] = self.get_Gpar()
-                trait.update_inputs(**trait_inputs)
+                    G_par = self.get_Gpar()
+                    trait_inputs['G_par'] = G_par
+                    trait_inputs['G_par_std'] = self.get_Gpar_std(G_par)
+                trait.update_inputs(copy_inputs=False, **trait_inputs)
                 trait.generate_trait()
             elif key == 'sex':
                 self.assign_sex()
@@ -434,7 +538,8 @@ class Population:
             'shape': shape, # the shape of the metric output at each generation
             'valid_keys': set(inspect.signature(metric_func).parameters.keys()), # the valid keys for the metric function
             'kwargs': kwargs, # the fixed settings of the metric function
-            'values': None # the values of the metric over generations, initialized to None
+            'values': None, # the values of the metric over generations, initialized to None
+            'ts': None,
             }
     
     def _prep_metrics(self, generations: int):
@@ -449,8 +554,9 @@ class Population:
                 shape = [generations] + self.metric[metric_name]['shape']
                 # initializes values to NaN
                 self.metric[metric_name]['temp'] = np.full(shape, np.nan)
+                self.metric[metric_name]['temp_ts'] = np.full(generations, -1, dtype=np.int64)
 
-    def _update_temp_metrics(self, t: int, **kwargs):
+    def _update_temp_metrics(self, t: int, generation: int = None, **kwargs):
         '''
         Updates the temporary metrics for the current generation. This is done by calling the metric function with the current generation's data and storing the result in the temporary metric array. The method `_prep_metrics` should be called before this method to prepare the temporary metric arrays.
         Parameters:
@@ -469,6 +575,7 @@ class Population:
                     metric_output = np.array([metric_output])
                 # updates metric values in temporary array
                 self.metric[metric_name]['temp'][t,] = metric_output
+                self.metric[metric_name]['temp_ts'][t] = self.t if generation is None else generation
         
     def _update_metric_history(self):
         '''
@@ -478,13 +585,36 @@ class Population:
             if self.metric[metric_name]['active']:
                 # gets temporary metric values
                 temp_values = self.metric[metric_name]['temp']
+                temp_ts = self.metric[metric_name]['temp_ts']
                 # appends to permanent values
-                if self.metric[metric_name]['values'] is None:
-                    self.metric[metric_name]['values'] = temp_values
+                if self.metric[metric_name]['values'] is None or self.metric[metric_name]['ts'] is None:
+                    values = temp_values
+                    ts = temp_ts
                 else:
-                    self.metric[metric_name]['values'] = np.concatenate((self.metric[metric_name]['values'], temp_values), axis=0)
+                    values = np.concatenate((self.metric[metric_name]['values'], temp_values), axis=0)
+                    ts = np.concatenate((self.metric[metric_name]['ts'], temp_ts), axis=0)
+
+                if self.metric_retention == 'disabled':
+                    self.metric[metric_name]['values'] = None
+                    self.metric[metric_name]['ts'] = None
+                else:
+                    if self.metric_retention == 'store_last_k':
+                        if self.metric_last_k is None or self.metric_last_k <= 0:
+                            raise ValueError(
+                                "metric_last_k must be a positive integer when metric_retention='store_last_k'."
+                            )
+                        values = values[-self.metric_last_k:]
+                        ts = ts[-self.metric_last_k:]
+                    elif self.metric_retention == 'summary_only':
+                        values = values[[-1]]
+                        ts = ts[[-1]]
+                    elif self.metric_retention != 'store_every':
+                        raise ValueError(f"Unknown metric retention policy: {self.metric_retention}")
+                    self.metric[metric_name]['values'] = values
+                    self.metric[metric_name]['ts'] = ts
                 # clears temporary metric values
                 self.metric[metric_name].pop('temp', None)
+                self.metric[metric_name].pop('temp_ts', None)
 
     def _initialize_metrics(self, **kwargs):
         '''
@@ -493,7 +623,7 @@ class Population:
             **kwargs: All extra arguments that are passed to any metric function. Only the parameters needed for each metric function are passed to that function. The pre-specified arguments set in `_define_metric()` are automatically passed to each metric function.
         '''
         self._prep_metrics(1)
-        self._update_temp_metrics(0, **kwargs)
+        self._update_temp_metrics(0, generation=self.t, **kwargs)
         self._update_metric_history()
     
     ####################################
@@ -546,10 +676,11 @@ class Population:
                 'Assortative mating can only be simulated if traits are updated for each generation. '
                 'Set trait_updates=True when passing AM-related arguments.'
             )
+        if self.metric_retention == 'store_last_k' and (self.metric_last_k is None or self.metric_last_k <= 0):
+            raise ValueError("metric_last_k must be a positive integer when metric_retention='store_last_k'.")
 
         # preps metrics for new generations
         self._prep_metrics(generations)
-        previous_gens = self.metric['p']['values'].shape[0]
         
         # loops through each generation
         for t in range(generations):
@@ -557,19 +688,21 @@ class Population:
                 (H, relations, Haplos) = self.generate_offspring(**kwargs)
             else:
                 H = self.next_generation(**kwargs)
-                Haplos = np.full_like(H, -1, dtype=int) # unrelated haplotypes
+                Haplos = None
+                if self.track_haplotypes:
+                    Haplos = np.full(H.shape, -1, dtype=np.int32)
                 relations = None
             # updates objects and past
             self._update_obj(H=H, update_past=True, relations=relations, Haplos=Haplos, update_pedigree=self.track_pedigree)
             # records metrics
-            self._update_temp_metrics(t, G=self.G)
+            self._update_temp_metrics(t, generation=self.t, G=self.G)
             if trait_updates:
                 self.update_traits()
             else:
                 self.update_traits(traits=['sex']) # always updated in each generation
             if verbose:
                 print(f'Simulated generation {self.t}')
-        self.T_breaks.append(previous_gens + generations)
+        self.T_breaks.append(self.t)
         if not trait_updates:
             self.update_traits()
         # saves metrics to object
@@ -595,7 +728,7 @@ class Population:
         if self.N % 2 != 0:
             raise Exception('Population size must be multiple of 2.')
         N2 = self.N // 2
-        rel_spouses = np.zeros((self.N,self.N), dtype=bool) # relationship matrix for spouses
+        spouse_idx = np.full(self.N, -1, dtype=np.int32)
 
         # extracts assortative mating value:
         if AM_r != 0 and AM_trait is not None:
@@ -622,11 +755,11 @@ class Population:
         # sorts mothers and fathers by mate value
         iMs = iMs[np.argsort(AM_values[iMs])]
         iPs = iPs[np.argsort(mate_values[iPs])]    
-        # updates relationship matrix for spouses
-        rel_spouses[iMs, iPs] = 1
-        rel_spouses[iPs, iMs] = 1
+        # updates compact spouse indices
+        spouse_idx[iMs] = iPs
+        spouse_idx[iPs] = iMs
 
-        return ((iMs, iPs), rel_spouses)
+        return ((iMs, iPs), spouse_idx)
 
     def get_spouse_corr(self, trait: str, type: str = 'phenotypic') -> float:
         '''
@@ -648,8 +781,9 @@ class Population:
         else:
             raise Exception(f'Unknown type: {type}. Must be "phenotypic" or "genetic".')
         
-        spouses = self.relations['spouses'].astype(bool)
-        i_spouse, j_spouse = np.where(np.triu(spouses, k=1))
+        spouse_idx = np.asarray(self.relations['spouses'], dtype=np.int32)
+        i_spouse = np.flatnonzero((spouse_idx >= 0) & (np.arange(self.N) < spouse_idx))
+        j_spouse = spouse_idx[i_spouse]
 
         if len(i_spouse) == 0:
             raise Exception('No spouse pairs found in spouse relationship matrix.')
@@ -670,35 +804,30 @@ class Population:
         if getattr(self, 'G_par', None) is not None:
             return self.G_par
 
-        if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
-            raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
-        G_prev = self.past[1].G
-
-        if 'par_idx' in self.relations:
-            par_idx = np.asarray(self.relations['par_idx'])
-            if par_idx.shape != (self.N, 2):
-                raise Exception('Parent index array has incompatible shape for current generation.')
-            if np.any(par_idx < 0) or np.any(par_idx >= self.past[1].N):
-                raise Exception('Parent index array contains invalid indices for previous generation.')
-
-            unique_parents, inverse = np.unique(par_idx, return_inverse=True)
-            G_prev_unique = G_prev[unique_parents]
-            inverse = inverse.reshape(self.N, 2)
-            self.G_par = G_prev_unique[inverse[:, 0]] + G_prev_unique[inverse[:, 1]]
-            return self.G_par
-
         if 'parents' not in self.relations:
-            raise Exception("Parent relationship information not found in object. Make sure `relations['par_idx']` or `relations['parents']` exists.")
+            raise Exception("Parent relationship information not found in object. Make sure `relations['parents']` exists.")
 
-        parents = self.relations['parents']
-        if parents.shape != (self.N, self.past[1].N):
-            raise Exception('Parent relationship matrix has incompatible shape for previous generation.')
+        parent_ids = np.asarray(self.relations['parents'], dtype=np.int32)
+        if parent_ids.shape != (self.N, 2):
+            raise Exception('Parent index array has incompatible shape for current generation.')
 
-        parent_counts = parents.sum(axis=1)
-        if not np.all(parent_counts == 2):
-            raise Exception('Each individual must have exactly two recorded parents to compute `Gpar`.')
+        parent_N = int(self.relations.get('parent_N', self.N))
+        if parent_N == self.N:
+            G_source = self.G
+        else:
+            if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
+                raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
+            if parent_N != self.past[1].N:
+                raise Exception('Stored parent dimension is incompatible with the previous generation.')
+            G_source = self.past[1].G
 
-        self.G_par = parents @ G_prev
+        if np.any(parent_ids < 0) or np.any(parent_ids >= G_source.shape[0]):
+            raise Exception('Parent index array contains invalid indices for the source generation.')
+
+        unique_parents, inverse = np.unique(parent_ids, return_inverse=True)
+        G_unique = G_source[unique_parents]
+        inverse = inverse.reshape(self.N, 2)
+        self.G_par = G_unique[inverse[:, 0]] + G_unique[inverse[:, 1]]
         return self.G_par
 
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
@@ -720,13 +849,17 @@ class Population:
 
         # Assortative Mating ####        
         # pairs up mates
-        (iMs, iPs), rel_spouses = self._pair_mates(**kwargs)
+        (iMs, iPs), spouse_idx = self._pair_mates(**kwargs)
 
         # Selection ####
         if isinstance(s, (float, int)):
-            s = np.full(self.M, s)
-        # computes individuals' breeding weight (assumes linear additive fitness effects)
-        W = np.exp( (np.log(1 + self.G * s[None, :])).sum(axis=1) )
+            if s == 0:
+                W = np.ones(self.N, dtype=float)
+            else:
+                W = np.exp(np.log1p(self.G * s).sum(axis=1))
+        else:
+            s = np.asarray(s, dtype=float)
+            W = np.exp(np.log1p(self.G * s[None, :]).sum(axis=1))
         # computes each pair's breeding weight
         W_pair = W[iMs] * W[iPs]
         # computs probability of each parent pair being chosen to mate for one offspring
@@ -735,67 +868,51 @@ class Population:
         N_offspring = self.N
         # draws indices of parents for each offspring
         i_mate = np.random.choice(np.arange(len(iMs)), size=N_offspring, p=P_mate)
-        parents = np.stack((iMs[i_mate], iPs[i_mate]), axis=1)
-        # makes relationship matrix for full siblings
-        M_mate = np.zeros((N_offspring, len(iMs)), dtype=bool)
-        M_mate[np.arange(N_offspring), i_mate] = 1
-        rel_fullsibs = M_mate @ M_mate.T
-        np.fill_diagonal(rel_fullsibs, 0)
+        parents = np.stack((iMs[i_mate], iPs[i_mate]), axis=1).astype(np.int32, copy=False)
+        family_ids = i_mate.astype(np.int32, copy=False)
 
         # Drift + Recombination ####
         # generates variants for which a crossover event happens for each parent of each offspring
         crossover_events = np.random.binomial(n=1, p=self.R.reshape(1, self.M, 1),
-                                              size=(N_offspring, self.M, 2))
+                                              size=(N_offspring, self.M, 2)).astype(bool)
         # determines the shift in haplotype phase for each parent's haplotype at each variant
-        haplo_phase = np.cumsum(crossover_events, axis=1)
+        haplo_phase = np.logical_xor.accumulate(crossover_events, axis=1)
         # randomly chooses haplotype to start with for each parent of each offspring
-        haplo_k0 = np.random.binomial(n=1, p=1/self.P, size = (N_offspring ,2))
-        # adds the starting shift and gets the modulo so that haplotype phase acts as an index
-        haplo_ks = (haplo_k0[:, None, :] + haplo_phase) % 2
+        haplo_k0 = np.random.binomial(n=1, p=1/self.P, size=(N_offspring, 2)).astype(bool)
+        haplo_ks = np.logical_xor(haplo_phase, haplo_k0[:, None, :]).astype(np.int8, copy=False)
 
-        rel_parents = np.zeros((N_offspring, self.N), dtype=bool) # relationship matrix for parent-child relationships
-        par_idx = np.full((N_offspring, 2), -1, dtype=int) # initializes parent index array
-        H = np.empty((N_offspring, self.M, self.P), dtype=int)
-        Haplos = np.full_like(H, -1) # initializes haplotype ID array with -1s
-        for i in np.arange(N_offspring):
-            iM = parents[i,0]
-            iP = parents[i,1]
-            # extract allele from correct haplotype of each parent
-            haploM = self.H[iM, np.arange(self.M), haplo_ks[i, :, 0]]
-            haploP = self.H[iP, np.arange(self.M), haplo_ks[i, :, 1]]
-            haplos = np.stack((haploM, haploP), axis = 1)
-            # shuffles haplotypes around. [EDIT]: nevermind, want to keep consistent maternal vs paternal order
-            # chr_order = np.random.choice(self.P, size=self.P, replace=False)
-            chr_order = np.arange(self.P)
-            haplos = haplos[:,chr_order]
-            H[i,:,:] = haplos
+        variant_idx = np.arange(self.M, dtype=np.int32)[None, :]
+        maternal_idx = parents[:, 0][:, None]
+        paternal_idx = parents[:, 1][:, None]
 
-            # does same inheritance for haplotype IDs (instead of allele dosages)
-            # (yes, I know it's confusing that I am using H/haplo to refer to both)
-            HaploM = self.Haplos[iM, np.arange(self.M), haplo_ks[i, :, 0]]
-            HaploP = self.Haplos[iP, np.arange(self.M), haplo_ks[i, :, 1]]
-            Haplos_i = np.stack((HaploM, HaploP), axis = 1)
+        H = np.empty((N_offspring, self.M, self.P), dtype=self.H.dtype)
+        H[:, :, 0] = self.H[maternal_idx, variant_idx, haplo_ks[:, :, 0]]
+        H[:, :, 1] = self.H[paternal_idx, variant_idx, haplo_ks[:, :, 1]]
 
-            Haplos_i = Haplos_i[:,chr_order]
-            Haplos[i,:,:] = Haplos_i
-
-            # updates relationship matrix for parent-child relationships, and stores parent indices
-            rel_parents[i, iM] = 1
-            rel_parents[i, iP] = 1
-            par_idx[i, :] = [iM, iP] # mom is always col 0, dad is always col 1
+        Haplos = None
+        if self.track_haplotypes:
+            self._require_haplotype_tracking()
+            Haplos = np.empty((N_offspring, self.M, self.P), dtype=self.Haplos.dtype)
+            Haplos[:, :, 0] = self.Haplos[maternal_idx, variant_idx, haplo_ks[:, :, 0]]
+            Haplos[:, :, 1] = self.Haplos[paternal_idx, variant_idx, haplo_ks[:, :, 1]]
 
         # Mutations ####
         if isinstance(mu, (float, int)):
-            mu = np.full(self.M, mu)
-        mutations = np.random.binomial(n=1, p=mu[None,:,None], size = (N_offspring, self.M, self.P))
-        # Apply mutations by flipping alleles (0 to 1 or 1 to 0) based on the mutation matrix
-        H = (H + mutations) % 2
+            if mu != 0:
+                mutations = np.random.binomial(n=1, p=mu, size=H.shape).astype(H.dtype, copy=False)
+                H ^= mutations
+        else:
+            mu = np.asarray(mu, dtype=float)
+            mutations = np.random.binomial(n=1, p=mu[None, :, None], size=H.shape).astype(H.dtype, copy=False)
+            H ^= mutations
 
         # updates relationship matrix for parent-child relationships
-        relations = {'spouses': rel_spouses.astype(np.uint8), # occupies more space than a bool, but cleaner to see
-                     'parents': rel_parents.astype(np.uint8),
-                     'par_idx': par_idx, # stores actual indices of parents
-                     'full_sibs': rel_fullsibs.astype(np.uint8)}
+        relations = {
+            'spouses': spouse_idx,
+            'parents': parents,
+            'parent_N': self.N,
+            'full_sibs': family_ids,
+        }
 
         return (H, relations, Haplos)
 
@@ -814,28 +931,42 @@ class Population:
         spop = SuperPopulation(pops)
         # combines the populations together inside the SuperPopulation object
         pops_i = list(range(generations + 1))
-        spop.join_populations(pops_i, shared_haplotypes=True)
+        spop.join_populations(pops_i, shared_haplotypes=self.track_haplotypes)
         new_pop = spop.pops[-1] # the last population in the SuperPopulation is the combined one
         new_pop.keep_past_generations = self.keep_past_generations
-        new_pop.relations = pop.initialize_relations(new_pop.N)
-        del new_pop.relations['parents'] # default parents matrix is not accurate here
+        new_pop.relations = pop.initialize_relations(new_pop.N, N1=new_pop.N)
 
         # updates relationship matrices in combined population
-        # full_sibs
-        full_sibs = block_diag(*[pop.relations['full_sibs'] for pop in pops])
-        # spouses
-        spouses = block_diag(*[pop.relations['spouses'] for pop in pops])
-        # parent-child
-        parent_child = np.zeros((new_pop.N, new_pop.N), dtype=np.uint8)
         Ns_cumsum = np.cumsum([0] + Ns)
-        for gen in range(generations):
-            gen_parents = pops[gen].relations['parents']
+        spouses = np.full(new_pop.N, -1, dtype=np.int32)
+        full_sibs = np.full(new_pop.N, -1, dtype=np.int32)
+        next_family = 0
+        for gen, pop_gen in enumerate(pops):
             i_start = Ns_cumsum[gen]
             i_end = Ns_cumsum[gen + 1]
-            j_start = Ns_cumsum[gen + 1]
-            j_end = Ns_cumsum[gen + 2]
-            parent_child[i_start:i_end, j_start:j_end] = gen_parents
-            parent_child[j_start:j_end, i_start:i_end] = gen_parents.T
+
+            spouse_ids = np.asarray(pop_gen.relations['spouses'], dtype=np.int32)
+            valid_spouse = spouse_ids >= 0
+            shifted_spouses = np.full(pop_gen.N, -1, dtype=np.int32)
+            shifted_spouses[valid_spouse] = spouse_ids[valid_spouse] + i_start
+            spouses[i_start:i_end] = shifted_spouses
+
+            family_ids = np.asarray(pop_gen.relations['full_sibs'], dtype=np.int32)
+            valid_family = family_ids >= 0
+            shifted_family = np.full(pop_gen.N, -1, dtype=np.int32)
+            if np.any(valid_family):
+                _, inverse = np.unique(family_ids[valid_family], return_inverse=True)
+                shifted_family[valid_family] = inverse + next_family
+                next_family = shifted_family[valid_family].max() + 1
+            full_sibs[i_start:i_end] = shifted_family
+
+        for gen in range(generations):
+            gen_parents = pops[gen].relations['parents'].copy()
+            i_start = Ns_cumsum[gen]
+            i_end = Ns_cumsum[gen + 1]
+            valid_mask = gen_parents >= 0
+            gen_parents[valid_mask] += Ns_cumsum[gen + 1]
+            new_pop.relations['parents'][i_start:i_end, :] = gen_parents
 
         # creates accurate Pedigree object for combined population
 
@@ -889,7 +1020,6 @@ class Population:
         # actually sets relations
         new_pop.relations['full_sibs'] = full_sibs
         new_pop.relations['spouses'] = spouses
-        new_pop.relations['parent_child'] = parent_child
 
         return new_pop
 
@@ -910,7 +1040,7 @@ class Population:
                 next_inds = []
                 for ind in current_inds:
                     # gets indices of parents for individual ind
-                    par_inds = self.past[gen].relations['par_idx'][ind, :]
+                    par_inds = self.past[gen].relations['parents'][ind, :]
                     next_inds.extend(par_inds.tolist())
                 i_ancestors.append(next_inds)
                 current_inds = next_inds
@@ -938,6 +1068,7 @@ class Population:
         if j_idxs is None:
             j_idxs = list(range(self.N))
 
+        self._require_haplotype_tracking()
         IBD_segments = []
         for i in i_idxs:
             for j in j_idxs:
@@ -977,15 +1108,17 @@ class Population:
             j_keep = tuple( range(self.M) )
         # uses population's allele frequency history
         ps = self.metric['p']['values']
+        ts_all = self.metric['p'].get('ts')
+        if ps is None or ts_all is None:
+            raise ValueError('Allele-frequency history is not available under the current metric retention policy.')
         # plots all generations if not specified
         if last_generations is None:
-            t_start = 0
+            keep_mask = np.ones(ps.shape[0], dtype=bool)
         else:
-            t_start = max(0,ps.shape[0] - last_generations)
-        t_keep = tuple( range(t_start, ps.shape[0]))
+            keep_mask = ts_all >= (ts_all[-1] - last_generations + 1)
         # subsets to specified variants
-        ts = np.arange(t_start, ps.shape[0])
-        ps = ps[np.ix_(t_keep, j_keep)]
+        ts = ts_all[keep_mask]
+        ps = ps[keep_mask][:, j_keep]
         
         # if True, gets mean and quartiles for variants over time, which are plotted instead
         if summarize:
@@ -1393,6 +1526,7 @@ class Trait:
 
         self.update_inputs(copy.deepcopy(inputs))
         self.generate_trait()
+        self.validate()
 
     def _initialize_empty(self):
         self.pop = None
@@ -1464,11 +1598,11 @@ class Trait:
         else:
             raise ValueError("Trait input 'N' must always be available.")
 
-    def update_inputs(self, inputs: dict = None, **kwargs):
+    def update_inputs(self, inputs: dict = None, copy_inputs: bool = True, **kwargs):
         '''
         Updates the stored inputs for the trait and refreshes any derived inputs.
         '''
-        new_inputs = {} if inputs is None else copy.deepcopy(inputs)
+        new_inputs = {} if inputs is None else (copy.deepcopy(inputs) if copy_inputs else dict(inputs))
         new_inputs.update(kwargs)
 
         # When primary genotype inputs change, invalidate cached genotype SDs so they are
@@ -1605,18 +1739,23 @@ class Trait:
         if self.type in {'fixed', 'permanent'}:
             raise ValueError(f"Cannot regenerate a {self.type} trait from stored effects.")
         if inputs is not None or kwargs:
-            self.update_inputs(inputs=inputs, **kwargs)
+            self.update_inputs(inputs=inputs, copy_inputs=False, **kwargs)
 
         self.y_ = {}
+        total = None
         for name, effect in self.effects.items():
             effect.refresh_from_inputs(self.inputs)
-            self.y_[name] = effect.generate_component(self.inputs, pop=self.pop)
+            values = effect.generate_component(self.inputs, pop=self.pop)
+            self.y_[name] = values
+            if total is None:
+                total = np.array(values, copy=True)
+            else:
+                total += values
 
-        self.y = np.sum(np.column_stack(list(self.y_.values())), axis=1)
+        self.y = np.zeros(int(self.inputs['N']), dtype=float) if total is None else total
         self.type = 'composite'
         self._update_empirical_variances()
         self._update_initial_variances()
-        self.validate()
 
     def set_force_var(self, force_var: bool,
                       names: Union[str, list[str]] = None,
@@ -1769,9 +1908,6 @@ class Trait:
         if len(traits) == 0:
             raise ValueError('Must provide at least one trait to concatenate.')
 
-        for trait in traits:
-            trait.validate()
-
         first = traits[0]
         if any(trait.type != first.type for trait in traits):
             raise ValueError('All concatenated traits must have the same type.')
@@ -1792,7 +1928,6 @@ class Trait:
             trait_new._update_empirical_variances()
             trait_new.var_initial = copy.deepcopy(first.var_initial)
             trait_new.inputs = {'N': sum(int(trait.inputs['N']) for trait in traits)}
-            trait_new.validate()
             return trait_new
 
         trait_new.effects = copy.deepcopy(first.effects)
@@ -1836,17 +1971,27 @@ class Trait:
         trait_new._refresh_derived_inputs()
 
         trait_new.y_ = {}
+        total = None
         for name, effect in trait_new.effects.items():
             if isinstance(effect, NoiseEffect):
-                trait_new.y_[name] = np.concatenate([trait.y_[name] for trait in traits])
+                values = np.concatenate([trait.y_[name] for trait in traits])
+                trait_new.y_[name] = values
+                if total is None:
+                    total = np.array(values, copy=True)
+                else:
+                    total += values
                 continue
             effect.refresh_from_inputs(trait_new.inputs)
-            trait_new.y_[name] = effect.generate_component(trait_new.inputs, pop=trait_new.pop)
+            values = effect.generate_component(trait_new.inputs, pop=trait_new.pop)
+            trait_new.y_[name] = values
+            if total is None:
+                total = np.array(values, copy=True)
+            else:
+                total += values
 
-        trait_new.y = np.sum(np.column_stack(list(trait_new.y_.values())), axis=1)
+        trait_new.y = np.zeros(int(trait_new.inputs['N']), dtype=float) if total is None else total
         trait_new._update_empirical_variances()
         trait_new._update_initial_variances()
-        trait_new.validate()
         return trait_new
 
     def index_trait(self, i_keep: np.ndarray, G: np.ndarray = None,
@@ -1854,7 +1999,6 @@ class Trait:
         '''
         Returns a Trait object that contains only the specified individuals.
         '''
-        self.validate()
         trait_new = self.__class__.__new__(self.__class__)
         trait_new._initialize_empty()
         trait_new.pop = self.pop
@@ -1881,7 +2025,6 @@ class Trait:
         trait_new._refresh_derived_inputs()
 
         trait_new._update_initial_variances()
-        trait_new.validate()
         return trait_new
 
 class SuperPopulation:
@@ -2007,8 +2150,19 @@ class SuperPopulation:
         # merges haplotypes of specified populations
         H = np.concatenate([pop_i.H for pop_i in gen_pops], axis=0)
         track_pedigree = any(pop_i.track_pedigree for pop_i in gen_pops)
-        new_pop = Population.from_H(H, keep_past_generations=keep_past_generations,
-                                    track_pedigree=track_pedigree)
+        track_haplotypes = any(pop_i.track_haplotypes for pop_i in gen_pops)
+        if shared_haplotypes and any(not pop_i.track_haplotypes or pop_i.Haplos is None for pop_i in gen_pops):
+            raise ValueError(
+                'shared_haplotypes=True requires haplotype IDs to be stored for every joined population.'
+            )
+        new_pop = Population.from_H(
+            H,
+            keep_past_generations=keep_past_generations,
+            track_pedigree=track_pedigree,
+            track_haplotypes=track_haplotypes,
+            metric_retention=gen_pops[0].metric_retention,
+            metric_last_k=gen_pops[0].metric_last_k,
+        )
 
         # preserves shared genome metadata from the first population
         new_pop.R = gen_pops[0].R.copy()
@@ -2017,20 +2171,26 @@ class SuperPopulation:
         new_pop.T_breaks = copy.deepcopy(gen_pops[0].T_breaks)
 
         # merging Haplotype IDs
-        if shared_haplotypes:
-            Haplos = np.concatenate([pop_i.Haplos for pop_i in gen_pops], axis=0)
+        if track_haplotypes:
+            if shared_haplotypes:
+                Haplos = np.concatenate([pop_i.Haplos for pop_i in gen_pops], axis=0)
+            else:
+                shift = 0
+                P = gen_pops[0].P
+                Haplos_list = []
+                for pop_i in gen_pops:
+                    if pop_i.track_haplotypes and pop_i.Haplos is not None:
+                        Haplos_i = pop_i.Haplos.copy()
+                        valid_mask = Haplos_i >= 0
+                        Haplos_i[valid_mask] += shift
+                    else:
+                        Haplos_i = np.full(pop_i.H.shape, -1, dtype=np.int32)
+                    Haplos_list.append(Haplos_i)
+                    shift += P * pop_i.N
+                Haplos = np.concatenate(Haplos_list, axis=0)
+            new_pop.Haplos = Haplos
         else:
-            shift = 0
-            P = gen_pops[0].Haplos.shape[2]  # ploidy: number of haplotypes per individual
-            Haplos_list = []
-            for pop_i in gen_pops:
-                Haplos_i = pop_i.Haplos.copy()
-                valid_mask = Haplos_i >= 0
-                Haplos_i[valid_mask] += shift
-                Haplos_list.append(Haplos_i)
-                shift += P * pop_i.N
-            Haplos = np.concatenate(Haplos_list, axis=0)
-        new_pop.Haplos = Haplos
+            new_pop.Haplos = None
 
         # recursively joins older generations from the same source populations
         joined_prev = None
@@ -2053,48 +2213,59 @@ class SuperPopulation:
         # updates relations
         prev_N = joined_prev.N if joined_prev is not None else None
         relations = pop.initialize_relations(new_pop.N, N1=prev_N)
+        row_offsets = np.cumsum([0] + [pop_i.N for pop_i in gen_pops])
 
-        for rel_type in ('full_sibs', 'spouses'):
-            rel_blocks = [pop_i.relations[rel_type] for pop_i in gen_pops]
-            relations[rel_type] = block_diag(*rel_blocks).astype(np.uint8)
+        next_family = 0
+        for k, pop_i in enumerate(gen_pops):
+            i_start = row_offsets[k]
+            i_end = row_offsets[k + 1]
+
+            spouse_ids = np.asarray(pop_i.relations['spouses'], dtype=np.int32)
+            valid_spouse = spouse_ids >= 0
+            shifted_spouses = np.full(pop_i.N, -1, dtype=np.int32)
+            shifted_spouses[valid_spouse] = spouse_ids[valid_spouse] + i_start
+            relations['spouses'][i_start:i_end] = shifted_spouses
+
+            family_ids = np.asarray(pop_i.relations['full_sibs'], dtype=np.int32)
+            valid_family = family_ids >= 0
+            shifted_family = np.full(pop_i.N, -1, dtype=np.int32)
+            if np.any(valid_family):
+                _, inverse = np.unique(family_ids[valid_family], return_inverse=True)
+                shifted_family[valid_family] = inverse + next_family
+                next_family = shifted_family[valid_family].max() + 1
+            relations['full_sibs'][i_start:i_end] = shifted_family
 
         if joined_prev is not None:
-            row_offsets = np.cumsum([0] + [pop_i.N for pop_i in gen_pops])
-            prev_sizes = [pop_i.relations['parents'].shape[1] for pop_i in gen_pops]
+            prev_sizes = [int(pop_i.relations.get('parent_N', pop_i.N)) for pop_i in gen_pops]
             if sum(prev_sizes) != joined_prev.N:
                 raise ValueError(
                     "Joined parent population size is incompatible with the source "
                     "populations' parent relationship matrices."
                 )
             col_offsets = np.cumsum([0] + prev_sizes)
-            parents = np.zeros((new_pop.N, joined_prev.N), dtype=np.uint8)
-            par_idx = np.full((new_pop.N, 2), -1, dtype=np.int32)
+            parents = np.full((new_pop.N, 2), -1, dtype=np.int32)
 
             for k, pop_i in enumerate(gen_pops):
                 i_start = row_offsets[k]
                 i_end = row_offsets[k + 1]
                 j_start = col_offsets[k]
-                j_end = col_offsets[k + 1]
 
-                rel_parents = pop_i.relations['parents']
-                if rel_parents.shape[0] != pop_i.N or rel_parents.shape[1] != (j_end - j_start):
+                pop_parent_ids = np.asarray(pop_i.relations['parents'], dtype=np.int32).copy()
+                if pop_parent_ids.shape != (pop_i.N, 2):
                     raise ValueError(
-                        "Population parent relationship matrix has incompatible shape."
+                        "Population compact parent representation has incompatible shape."
                     )
-                parents[i_start:i_end, j_start:j_end] = rel_parents
-
-                pop_par_idx = pop_i.relations['par_idx'].copy()
-                valid_mask = pop_par_idx >= 0
-                pop_par_idx[valid_mask] += j_start
-                par_idx[i_start:i_end, :] = pop_par_idx
+                valid_mask = pop_parent_ids >= 0
+                pop_parent_ids[valid_mask] += j_start
+                parents[i_start:i_end, :] = pop_parent_ids
 
             relations['parents'] = parents
-            relations['par_idx'] = par_idx
+            relations['parent_N'] = joined_prev.N
 
         new_pop.relations = relations
 
         if joined_prev is not None and track_pedigree:
-            new_pop.ped = Pedigree(new_pop.N, par_idx=relations['par_idx'],
+            new_pop.ped = Pedigree(new_pop.N, par_idx=relations['parents'],
                                    par_Ped=joined_prev.ped)
             new_pop.ped.construct_paths()
 
@@ -2169,13 +2340,19 @@ class SuperPopulation:
             i_new = i_shuffled[i_start:i_end]
             # creates new population from the haplotypes of the original population
             H_new = source.H[i_new, :, :]
-            new_pop = Population.from_H(H_new)
+            new_pop = Population.from_H(
+                H_new,
+                track_haplotypes=source.track_haplotypes,
+                metric_retention=source.metric_retention,
+                metric_last_k=source.metric_last_k,
+            )
+            if source.track_haplotypes and source.Haplos is not None:
+                new_pop.Haplos = source.Haplos[i_new, :, :].copy()
             # updates traits
             for name, trait in source.traits.items():
                 trait_new = trait.index_trait(i_new, source.G, G_already_indexed=False)
                 trait_new.pop = new_pop
                 trait_new.name = name
-                trait_new.validate()
                 new_pop.traits[name] = trait_new
             
             new_pops.append( new_pop )
