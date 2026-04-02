@@ -672,12 +672,25 @@ class Population:
 
         if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
             raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
-        if 'parents' not in self.relations:
-            raise Exception("Parent relationship matrix not found in object. Make sure `relations['parents']` exists.")
-
-        parents = self.relations['parents']
         G_prev = self.past[1].G
 
+        if 'par_idx' in self.relations:
+            par_idx = np.asarray(self.relations['par_idx'])
+            if par_idx.shape != (self.N, 2):
+                raise Exception('Parent index array has incompatible shape for current generation.')
+            if np.any(par_idx < 0) or np.any(par_idx >= self.past[1].N):
+                raise Exception('Parent index array contains invalid indices for previous generation.')
+
+            unique_parents, inverse = np.unique(par_idx, return_inverse=True)
+            G_prev_unique = G_prev[unique_parents]
+            inverse = inverse.reshape(self.N, 2)
+            self.G_par = G_prev_unique[inverse[:, 0]] + G_prev_unique[inverse[:, 1]]
+            return self.G_par
+
+        if 'parents' not in self.relations:
+            raise Exception("Parent relationship information not found in object. Make sure `relations['par_idx']` or `relations['parents']` exists.")
+
+        parents = self.relations['parents']
         if parents.shape != (self.N, self.past[1].N):
             raise Exception('Parent relationship matrix has incompatible shape for previous generation.')
 
