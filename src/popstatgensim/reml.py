@@ -142,6 +142,40 @@ def _build_v(Vs: list[np.ndarray], theta: np.ndarray) -> np.ndarray:
     return V
 
 
+def _factor_theta(
+    Vs: list[np.ndarray],
+    theta: np.ndarray,
+    *,
+    dtype: np.dtype | type = float,
+    overwrite_a: bool = False,
+) -> tuple[np.ndarray, tuple[np.ndarray, bool]]:
+    """Build and factor a covariance matrix for a candidate theta vector."""
+    V = theta[-1] * np.eye(Vs[0].shape[0], dtype=dtype)
+    for i, V_i in enumerate(Vs):
+        V += dtype(theta[i]) * V_i
+    Lc = cho_factor(V, lower=True, overwrite_a=overwrite_a, check_finite=False)
+    return V, Lc
+
+
+def _ensure_factorable_theta(
+    theta: np.ndarray,
+    Vs: list[np.ndarray],
+    *,
+    dtype: np.dtype | type = float,
+    max_tries: int = 12,
+) -> np.ndarray:
+    """Increase the residual component until the working covariance is factorable."""
+    theta = np.asarray(theta, dtype=float).copy()
+    theta[-1] = max(theta[-1], _TINY)
+    for _ in range(max_tries):
+        try:
+            _factor_theta(Vs, theta, dtype=dtype, overwrite_a=False)
+            return theta
+        except linalg.LinAlgError:
+            theta[-1] = max(theta[-1] * 2.0, 1e-6)
+    raise linalg.LinAlgError("Unable to construct a positive-definite starting covariance.")
+
+
 def _compute_beta_and_py(
     Lc: tuple[np.ndarray, bool],
     y: np.ndarray,
@@ -334,10 +368,23 @@ def _get_projection_matrix(Vinv: np.ndarray, X: np.ndarray | None) -> np.ndarray
     return Vinv - Vinv @ X @ XVX_inv @ X.T @ Vinv
 
 
-def _newton_step(AI: np.ndarray, grad: np.ndarray, theta: np.ndarray, constrain: bool) -> tuple[np.ndarray, np.ndarray]:
-    """Take a Newton-style update, with optional step-halving for positivity."""
+def _solve_update_direction(curvature: np.ndarray, score: np.ndarray) -> np.ndarray:
+    """Solve the local REML update system with a small diagonal stabilizer."""
     try:
-        delta = np.linalg.solve(AI + 1e-10 * np.eye(len(theta)), grad)
+        return np.linalg.solve(curvature + 1e-10 * np.eye(len(score)), score)
+    except np.linalg.LinAlgError:
+        return np.linalg.pinv(curvature) @ score
+
+
+def _legacy_newton_step(
+    curvature: np.ndarray,
+    score: np.ndarray,
+    theta: np.ndarray,
+    constrain: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Original Newton-style update used before REML safety checks were added."""
+    try:
+        delta = np.linalg.solve(curvature + 1e-10 * np.eye(len(theta)), score)
     except np.linalg.LinAlgError:
         return theta, np.zeros_like(theta)
     if not constrain:
@@ -350,6 +397,39 @@ def _newton_step(AI: np.ndarray, grad: np.ndarray, theta: np.ndarray, constrain:
         alpha *= 0.5
     candidate = np.maximum(theta, _TINY)
     return candidate, np.zeros_like(theta)
+
+
+def _line_search_update(
+    theta: np.ndarray,
+    delta: np.ndarray,
+    Vs: list[np.ndarray],
+    *,
+    constrain: bool,
+    dtype: np.dtype | type = float,
+    max_halvings: int = 25,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Shrink an update until the candidate covariance remains factorable."""
+    if np.max(np.abs(delta)) == 0:
+        return theta.copy(), np.zeros_like(theta), True
+
+    alpha = 1.0
+    for _ in range(max_halvings):
+        candidate = theta + alpha * delta
+        if constrain and np.any(candidate <= _TINY):
+            alpha *= 0.5
+            continue
+        try:
+            _factor_theta(Vs, candidate, dtype=dtype, overwrite_a=False)
+            if constrain:
+                candidate = np.maximum(candidate, _TINY)
+            return candidate, alpha * delta, True
+        except linalg.LinAlgError:
+            alpha *= 0.5
+    if constrain:
+        candidate = np.maximum(theta, _TINY)
+    else:
+        candidate = theta.copy()
+    return candidate, np.zeros_like(theta), False
 
 
 def _stochastic_component_ops(
@@ -449,6 +529,7 @@ def _finalise_output(
     iterations: int,
     converged: bool,
     method: str,
+    safety_checks: bool,
 ) -> dict:
     """Package common outputs and derived summary quantities into the public result dict."""
     theta = np.asarray(theta, dtype=float)
@@ -503,6 +584,7 @@ def _finalise_output(
             "method": method,
             "iterations": iterations,
             "converged": converged,
+            "safety_checks": safety_checks,
         },
         "log_likelihood": log_likelihood,
     }
@@ -522,12 +604,15 @@ def _run_ai_stochastic(
     n_probes: int,
     dtype: np.dtype,
     phenotype_variance: float,
+    safety_checks: bool,
 ) -> dict:
     """Run AI-REML using Hutchinson trace estimation."""
     n = y.shape[0]
     m = len(Vs)
     rng = np.random.default_rng(seed)
     theta = init.astype(np.float64, copy=True)
+    if safety_checks:
+        theta = _ensure_factorable_theta(theta, Vs, dtype=float)
     Vs_work = [V_i.astype(dtype, copy=False) for V_i in Vs]
     y_work = y.astype(dtype, copy=False)
     X_work = None if X_model is None else X_model.astype(dtype, copy=False)
@@ -556,15 +641,22 @@ def _run_ai_stochastic(
             theta = np.maximum(theta, _TINY)
 
         # Factor the current covariance in the chosen working precision.
-        V = theta[-1] * np.eye(n, dtype=dtype)
-        for i, V_i in enumerate(Vs_work):
-            V += dtype(theta[i]) * V_i
+        if safety_checks:
+            try:
+                _, Lc = _factor_theta(Vs_work, theta, dtype=dtype, overwrite_a=True)
+            except linalg.LinAlgError:
+                theta = _ensure_factorable_theta(theta, Vs, dtype=float)
+                _, Lc = _factor_theta(Vs_work, theta, dtype=dtype, overwrite_a=True)
+        else:
+            V = theta[-1] * np.eye(n, dtype=dtype)
+            for i, V_i in enumerate(Vs_work):
+                V += dtype(theta[i]) * V_i
 
-        try:
-            Lc = cho_factor(V, lower=True, overwrite_a=True, check_finite=False)
-        except linalg.LinAlgError:
-            theta *= 1.05
-            continue
+            try:
+                Lc = cho_factor(V, lower=True, overwrite_a=True, check_finite=False)
+            except linalg.LinAlgError:
+                theta *= 1.05
+                continue
 
         # Solve for Py and the stochastic probe transforms under the current V.
         beta_last, VinvX, XVX_inv, Py = _compute_beta_and_py(Lc, y_work, X_work)
@@ -602,7 +694,21 @@ def _run_ai_stochastic(
 
         # Combine exact quadratic terms with stochastic trace terms for the score.
         grad = 0.5 * (quad - trace_vec)
-        theta, offsets = _newton_step(AI, grad, theta, constrain=constrain)
+        if safety_checks:
+            delta = _solve_update_direction(AI, grad)
+            theta, offsets, accepted = _line_search_update(
+                theta,
+                delta,
+                Vs,
+                constrain=constrain,
+                dtype=float,
+            )
+            if not accepted:
+                raise linalg.LinAlgError(
+                    "AI_stochastic could not find a positive-definite REML update."
+                )
+        else:
+            theta, offsets = _legacy_newton_step(AI, grad, theta, constrain=constrain)
         _print_iter_message(theta, offsets, iteration, verbose)
 
         if np.max(np.abs(offsets)) < tol and iteration >= 3:
@@ -615,8 +721,12 @@ def _run_ai_stochastic(
             print(f"Reached maximum iterations ({max_iter}) without convergence.")
 
     # Log-likelihood is only computed once, at the final estimate.
-    V_final = _build_v(Vs, theta)
-    Lc_final = cho_factor(V_final, lower=True, check_finite=False)
+    if safety_checks:
+        theta = _ensure_factorable_theta(theta, Vs, dtype=float)
+        _, Lc_final = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
+    else:
+        V_final = _build_v(Vs, theta)
+        Lc_final = cho_factor(V_final, lower=True, check_finite=False)
     beta_last, _, _, _ = _compute_beta_and_py(Lc_final, y, X_model)
     ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc_final)
     vcov = np.linalg.pinv(AI_last + 1e-12 * np.eye(m + 1))
@@ -633,6 +743,7 @@ def _run_ai_stochastic(
         iterations=iterations,
         converged=converged,
         method="AI_stochastic",
+        safety_checks=safety_checks,
     )
 
 
@@ -647,10 +758,13 @@ def _run_ai_exact(
     constrain: bool,
     verbose: int,
     phenotype_variance: float,
+    safety_checks: bool,
 ) -> dict:
     """Run AI-REML with exact traces and an explicit projection matrix."""
     m = len(Vs)
     theta = init.astype(float, copy=True)
+    if safety_checks:
+        theta = _ensure_factorable_theta(theta, Vs, dtype=float)
     AI_last = np.eye(m + 1, dtype=float)
     beta_last = None
     ll_last = None
@@ -662,12 +776,19 @@ def _run_ai_exact(
             theta = np.maximum(theta, _TINY)
 
         # Exact AI uses an explicit inverse/projection, so it is slower but deterministic.
-        V = _build_v(Vs, theta)
-        try:
-            Lc = cho_factor(V, lower=True, overwrite_a=False, check_finite=False)
-        except linalg.LinAlgError:
-            theta *= 1.05
-            continue
+        if safety_checks:
+            try:
+                _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
+            except linalg.LinAlgError:
+                theta = _ensure_factorable_theta(theta, Vs, dtype=float)
+                _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
+        else:
+            V = _build_v(Vs, theta)
+            try:
+                Lc = cho_factor(V, lower=True, overwrite_a=False, check_finite=False)
+            except linalg.LinAlgError:
+                theta *= 1.05
+                continue
 
         beta_last, VinvX, XVX_inv, Py = _compute_beta_and_py(Lc, y, X_model)
         Vinv = _potri_inverse(Lc)
@@ -684,7 +805,19 @@ def _run_ai_exact(
         trace_vec[m] = np.trace(P)
 
         grad = 0.5 * (quad - trace_vec)
-        theta, offsets = _newton_step(AI, grad, theta, constrain=constrain)
+        if safety_checks:
+            delta = _solve_update_direction(AI, grad)
+            theta, offsets, accepted = _line_search_update(
+                theta,
+                delta,
+                Vs,
+                constrain=constrain,
+                dtype=float,
+            )
+            if not accepted:
+                raise linalg.LinAlgError("AI could not find a positive-definite REML update.")
+        else:
+            theta, offsets = _legacy_newton_step(AI, grad, theta, constrain=constrain)
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -711,6 +844,7 @@ def _run_ai_exact(
         iterations=iterations,
         converged=converged,
         method="AI",
+        safety_checks=safety_checks,
     )
 
 
@@ -725,10 +859,13 @@ def _run_reml_em(
     constrain: bool,
     verbose: int,
     phenotype_variance: float,
+    safety_checks: bool,
 ) -> dict:
     """Run EM-REML with exact traces and exact projection matrices."""
     m = len(Vs)
     theta = init.astype(float, copy=True)
+    if safety_checks:
+        theta = _ensure_factorable_theta(theta, Vs, dtype=float)
     P_last = None
     beta_last = None
     ll_last = None
@@ -742,8 +879,11 @@ def _run_reml_em(
             theta = np.maximum(theta, _TINY)
 
         # EM updates every component using the expected complete-data moments.
-        V = _build_v(Vs, theta)
-        Lc = cho_factor(V, lower=True, check_finite=False)
+        if safety_checks:
+            _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
+        else:
+            V = _build_v(Vs, theta)
+            Lc = cho_factor(V, lower=True, check_finite=False)
         beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
         P = _get_projection_matrix(Vinv, X_model)
@@ -752,9 +892,20 @@ def _run_reml_em(
 
         for i, V_i in enumerate(Vs + [np.eye(y.shape[0])]):
             offsets[i] = theta[i] ** 2 * ((y.T @ P @ V_i @ P @ y) - np.trace(P @ V_i)) / sizes[i]
-        theta = theta + offsets
-        if constrain:
-            theta = np.maximum(theta, tol / 10)
+        if safety_checks:
+            theta, offsets, accepted = _line_search_update(
+                theta,
+                offsets,
+                Vs,
+                constrain=constrain,
+                dtype=float,
+            )
+            if not accepted:
+                raise linalg.LinAlgError("EM could not find a positive-definite REML update.")
+        else:
+            theta = theta + offsets
+            if constrain:
+                theta = np.maximum(theta, tol / 10)
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -788,6 +939,7 @@ def _run_reml_em(
         iterations=iterations,
         converged=converged,
         method="EM",
+        safety_checks=safety_checks,
     )
 
 
@@ -803,10 +955,13 @@ def _run_reml_quad_exact(
     constrain: bool,
     verbose: int,
     phenotype_variance: float,
+    safety_checks: bool,
 ) -> dict:
     """Run the exact quadratic REML methods: NR, FS, or AI."""
     m = len(Vs)
     theta = init.astype(float, copy=True)
+    if safety_checks:
+        theta = _ensure_factorable_theta(theta, Vs, dtype=float)
     curvature_last = np.eye(m + 1, dtype=float)
     beta_last = None
     ll_last = None
@@ -820,8 +975,11 @@ def _run_reml_quad_exact(
             theta = np.maximum(theta, _TINY)
 
         # The quadratic methods share the same score but differ in curvature.
-        V = _build_v(Vs, theta)
-        Lc = cho_factor(V, lower=True, check_finite=False)
+        if safety_checks:
+            _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
+        else:
+            V = _build_v(Vs, theta)
+            Lc = cho_factor(V, lower=True, check_finite=False)
         beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
         P = _get_projection_matrix(Vinv, X_model)
@@ -850,10 +1008,22 @@ def _run_reml_quad_exact(
             raise ValueError(f"Unsupported quadratic REML method '{method}'.")
 
         curvature_last = curvature
-        offsets = np.linalg.pinv(curvature) @ score
-        theta = theta + offsets
-        if constrain:
-            theta = np.maximum(theta, tol / 10)
+        if safety_checks:
+            delta = _solve_update_direction(curvature, score)
+            theta, offsets, accepted = _line_search_update(
+                theta,
+                delta,
+                Vs,
+                constrain=constrain,
+                dtype=float,
+            )
+            if not accepted:
+                raise linalg.LinAlgError(f"{method} could not find a positive-definite REML update.")
+        else:
+            offsets = np.linalg.pinv(curvature) @ score
+            theta = theta + offsets
+            if constrain:
+                theta = np.maximum(theta, tol / 10)
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -880,6 +1050,7 @@ def _run_reml_quad_exact(
         iterations=iterations,
         converged=converged,
         method=method,
+        safety_checks=safety_checks,
     )
 
 
@@ -961,6 +1132,7 @@ def run_HEreg(
         iterations=1,
         converged=True,
         method="HE",
+        safety_checks=False,
     )
     if prepared.X_model is not None:
         out["fixed_effects"]["est"] = beta_full
@@ -987,6 +1159,7 @@ def run_REML(
     n_probes: int = 50,
     seed: int = 42,
     dtype: np.dtype = np.float32,
+    safety_checks: bool = True,
 ) -> dict:
     """
     Runs REML to estimate variance components while accounting for fixed effects.
@@ -1016,7 +1189,10 @@ def run_REML(
         minus the sum of the supplied values. If omitted, an HE-based warm
         start is used.
     method : {'AI_stochastic', 'AI', 'EM', 'NR', 'FS'}
-        REML optimization method. Default is ``'AI_stochastic'``.
+        REML optimization method. Default is ``'AI_stochastic'``. If a
+        Newton-style method leaves the positive-definite covariance region or
+        fails to converge, ``run_REML()`` automatically retries a more stable
+        method (``AI_stochastic -> AI -> FS`` and ``AI/NR -> FS``).
     tol : float, default 1e-5
         Convergence threshold on the maximum absolute parameter update.
     max_iter : int
@@ -1036,6 +1212,11 @@ def run_REML(
     dtype : numpy dtype, default ``np.float32``
         Working precision for the stochastic AI solver. Ignored by the exact
         methods.
+    safety_checks : bool, default True
+        If True, keep REML updates inside the positive-definite covariance
+        region and allow automatic fallback to stabler methods when the
+        requested optimizer fails or does not converge. If False, use the
+        older faster-but-riskier update path without those safeguards.
 
     Returns
     -------
@@ -1045,9 +1226,10 @@ def run_REML(
         ``var_y`` containing ``before_FE``, ``after_FE``, ``sum_comp``, and
         ``sum_comp_se``; ``fixed_effects`` containing ``est``, ``se``, and
         ``vcov``; ``algorithm`` containing ``method``, ``iterations``, and
-        ``converged``; and ``log_likelihood``. If fixed effects are supplied,
-        the first entry in ``fixed_effects['est']`` is the intercept, followed
-        by the user-supplied covariates.
+        ``converged`` (plus ``safety_checks`` and ``requested_method`` if a
+        fallback was used); and ``log_likelihood``. If fixed effects are
+        supplied, the first entry in ``fixed_effects['est']`` is the
+        intercept, followed by the user-supplied covariates.
     """
     if method not in {"AI_stochastic", "AI", "EM", "NR", "FS"}:
         raise ValueError("`method` must be one of 'AI_stochastic', 'AI', 'EM', 'NR', or 'FS'.")
@@ -1087,58 +1269,102 @@ def run_REML(
             raise ValueError("Initial random-effect variances exceed the phenotype variance.")
         init_theta = np.concatenate([init, [resid_init]])
 
-    if method == "AI_stochastic":
-        return _run_ai_stochastic(
+    def _dispatch(method_i: str) -> dict:
+        if method_i == "AI_stochastic":
+            return _run_ai_stochastic(
+                y=prepared.y,
+                Vs=prepared.Vs,
+                X_user=prepared.X_user,
+                X_model=prepared.X_model,
+                init=init_theta,
+                tol=tol,
+                max_iter=max_iter,
+                constrain=constrain,
+                verbose=verbose,
+                seed=seed,
+                n_probes=n_probes,
+                dtype=dtype,
+                phenotype_variance=prepared.phenotype_variance,
+                safety_checks=safety_checks,
+            )
+        if method_i == "AI":
+            return _run_ai_exact(
+                y=prepared.y,
+                Vs=prepared.Vs,
+                X_user=prepared.X_user,
+                X_model=prepared.X_model,
+                init=init_theta,
+                tol=tol,
+                max_iter=max_iter,
+                constrain=constrain,
+                verbose=verbose,
+                phenotype_variance=prepared.phenotype_variance,
+                safety_checks=safety_checks,
+            )
+        if method_i == "EM":
+            return _run_reml_em(
+                y=prepared.y,
+                Vs=prepared.Vs,
+                X_user=prepared.X_user,
+                X_model=prepared.X_model,
+                init=init_theta,
+                tol=tol,
+                max_iter=max_iter,
+                constrain=constrain,
+                verbose=verbose,
+                phenotype_variance=prepared.phenotype_variance,
+                safety_checks=safety_checks,
+            )
+        return _run_reml_quad_exact(
             y=prepared.y,
             Vs=prepared.Vs,
             X_user=prepared.X_user,
             X_model=prepared.X_model,
             init=init_theta,
-            tol=tol,
-            max_iter=max_iter,
-            constrain=constrain,
-            verbose=verbose,
-            seed=seed,
-            n_probes=n_probes,
-            dtype=dtype,
-            phenotype_variance=prepared.phenotype_variance,
-        )
-    if method == "AI":
-        return _run_ai_exact(
-            y=prepared.y,
-            Vs=prepared.Vs,
-            X_user=prepared.X_user,
-            X_model=prepared.X_model,
-            init=init_theta,
+            method=method_i,
             tol=tol,
             max_iter=max_iter,
             constrain=constrain,
             verbose=verbose,
             phenotype_variance=prepared.phenotype_variance,
+            safety_checks=safety_checks,
         )
-    if method == "EM":
-        return _run_reml_em(
-            y=prepared.y,
-            Vs=prepared.Vs,
-            X_user=prepared.X_user,
-            X_model=prepared.X_model,
-            init=init_theta,
-            tol=tol,
-            max_iter=max_iter,
-            constrain=constrain,
-            verbose=verbose,
-            phenotype_variance=prepared.phenotype_variance,
+
+    fallback_order = {
+        "AI_stochastic": ["AI", "FS"],
+        "AI": ["FS"],
+        "NR": ["FS"],
+        "EM": [],
+        "FS": [],
+    }
+    attempts = [method] + (fallback_order[method] if safety_checks else [])
+
+    for i, method_i in enumerate(attempts):
+        try:
+            out = _dispatch(method_i)
+        except linalg.LinAlgError as exc:
+            if i == len(attempts) - 1:
+                raise
+            next_method = attempts[i + 1]
+            warnings.warn(
+                f"REML method '{method_i}' hit a non-positive-definite covariance; "
+                f"retrying with '{next_method}'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+
+        if out["algorithm"]["converged"] or i == len(attempts) - 1:
+            if method_i != method:
+                out["algorithm"]["requested_method"] = method
+            return out
+
+        next_method = attempts[i + 1]
+        warnings.warn(
+            f"REML method '{method_i}' did not converge within {max_iter} iterations; "
+            f"retrying with '{next_method}'.",
+            RuntimeWarning,
+            stacklevel=2,
         )
-    return _run_reml_quad_exact(
-        y=prepared.y,
-        Vs=prepared.Vs,
-        X_user=prepared.X_user,
-        X_model=prepared.X_model,
-        init=init_theta,
-        method=method,
-        tol=tol,
-        max_iter=max_iter,
-        constrain=constrain,
-        verbose=verbose,
-        phenotype_variance=prepared.phenotype_variance,
-    )
+
+    raise RuntimeError("run_REML exhausted all fallback methods without returning a result.")
