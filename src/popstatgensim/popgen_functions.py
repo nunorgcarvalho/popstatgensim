@@ -408,18 +408,24 @@ def summarize_ps(ps: np.ndarray = None, quantiles: tuple = (0.25, 0.5, 0.75)) ->
 #### Handling families ####
 ###########################
 
-def initialize_relations(N: int, N1: int = None):
+def initialize_relations(N: int, N1: int = None, parent_source: str = 'past'):
     '''
     Initializes a dictionary of relations for a population of N individuals.
     Parameters:
         N (int): Number of individuals in the population.
         N1 (int): Number of individuals in the parental generation. If not specified, defaults to N.
+        parent_source (str): Where compact parent indices point. Use 'past' when they
+            index the previous generation object and 'current' when they index rows in
+            the current population object itself (e.g. combined populations).
     '''
+    if parent_source not in {'past', 'current'}:
+        raise ValueError("parent_source must be either 'past' or 'current'.")
     if N1 is None:
         N1 = N
     relations = {
         'parents': np.full((N, 2), -1, dtype=np.int32),
         'parent_N': int(N1),
+        'parent_source': parent_source,
         'full_sibs': np.full(N, -1, dtype=np.int32),
         'spouses': np.full(N, -1, dtype=np.int32),
     }

@@ -812,14 +812,30 @@ class Population:
             raise Exception('Parent index array has incompatible shape for current generation.')
 
         parent_N = int(self.relations.get('parent_N', self.N))
-        if parent_N == self.N:
+        parent_source = self.relations.get('parent_source')
+        if parent_source is None:
+            valid_mask = parent_ids >= 0
+            if np.any(valid_mask):
+                row_ids = np.broadcast_to(
+                    np.arange(self.N, dtype=np.int32)[:, None],
+                    parent_ids.shape,
+                )
+                # Older combined-population objects store parent rows later in the same
+                # population, whereas ordinary simulated generations index past[1].
+                parent_source = 'current' if np.all(parent_ids[valid_mask] > row_ids[valid_mask]) else 'past'
+            else:
+                parent_source = 'past'
+
+        if parent_source == 'current':
             G_source = self.G
-        else:
+        elif parent_source == 'past':
             if not hasattr(self, 'past') or self.past is None or len(self.past) < 2 or self.past[1] is None:
                 raise Exception('Previous generation not available. Make sure `pop.past[1]` exists before calling `get_Gpar()`.')
             if parent_N != self.past[1].N:
                 raise Exception('Stored parent dimension is incompatible with the previous generation.')
             G_source = self.past[1].G
+        else:
+            raise Exception("Relation metadata 'parent_source' must be either 'past' or 'current'.")
 
         if np.any(parent_ids < 0) or np.any(parent_ids >= G_source.shape[0]):
             raise Exception('Parent index array contains invalid indices for the source generation.')
@@ -911,6 +927,7 @@ class Population:
             'spouses': spouse_idx,
             'parents': parents,
             'parent_N': self.N,
+            'parent_source': 'past',
             'full_sibs': family_ids,
         }
 
@@ -934,7 +951,7 @@ class Population:
         spop.join_populations(pops_i, shared_haplotypes=self.track_haplotypes)
         new_pop = spop.pops[-1] # the last population in the SuperPopulation is the combined one
         new_pop.keep_past_generations = self.keep_past_generations
-        new_pop.relations = pop.initialize_relations(new_pop.N, N1=new_pop.N)
+        new_pop.relations = pop.initialize_relations(new_pop.N, N1=new_pop.N, parent_source='current')
 
         # updates relationship matrices in combined population
         Ns_cumsum = np.cumsum([0] + Ns)
@@ -2497,6 +2514,7 @@ class SuperPopulation:
 
             relations['parents'] = parents
             relations['parent_N'] = joined_prev.N
+            relations['parent_source'] = 'past'
 
         new_pop.relations = relations
 
