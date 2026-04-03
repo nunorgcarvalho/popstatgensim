@@ -1592,6 +1592,50 @@ class CorrelatedRandomEffect(Effect):
         A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
         return (Z, A)
 
+    def _generate_component_identity_cluster_fast(self, reference_values: np.ndarray,
+                                                  Z: np.ndarray, A: np.ndarray) -> Optional[np.ndarray]:
+        '''
+        Fast path for identity cluster relationship matrices, which avoids dense
+        N x N kernel eigendecompositions.
+        '''
+        if A is None or not stat.is_identity_matrix(A):
+            return None
+
+        if Z is None:
+            assignments = np.arange(reference_values.shape[0], dtype=np.int32)
+        else:
+            assignments = stat.get_group_assignments_from_design(Z)
+            if assignments is None:
+                return None
+
+        reference_values = np.asarray(reference_values, dtype=float)
+        u_fixed = reference_values - reference_values.mean()
+        reference_var = float(u_fixed.var())
+        if np.isclose(reference_var, 0.0):
+            if np.isclose(self.r, 0.0):
+                return np.zeros_like(reference_values)
+            raise ValueError(
+                f'Correlated random effect {self.name} cannot target non-zero correlation with '
+                f'zero-variance reference {self._reference_label()}.'
+            )
+
+        y_fixed = u_fixed / np.sqrt(reference_var)
+        propagated = stat.apply_identity_cluster_kernel_sqrt(assignments, y_fixed)
+        trace_random = stat.get_identity_cluster_kernel_trace(assignments)
+        rho = stat._calibrate_random_fixed_loading_from_propagated(
+            u_fixed=u_fixed,
+            propagated=propagated,
+            trace_random=trace_random,
+            target_corr=self.r,
+            fixed_name=self._reference_label(),
+            random_name=self.name,
+        )
+
+        latent_noise = np.random.normal(size=reference_values.shape[0])
+        latent_values = rho * y_fixed + np.sqrt(max(1.0 - rho * rho, 0.0)) * latent_noise
+        raw_values = stat.apply_identity_cluster_kernel_sqrt(assignments, latent_values)
+        return stat._center_and_scale_random_effect(raw_values, self.var, self.name)
+
     def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Generates a random effect correlated with one previously realized reference.
@@ -1607,6 +1651,14 @@ class CorrelatedRandomEffect(Effect):
             )
 
         Z, A = self._resolve_kernel(N=N, pop=pop)
+
+        fast_values = self._generate_component_identity_cluster_fast(
+            reference_values=reference_values,
+            Z=Z,
+            A=A,
+        )
+        if fast_values is not None:
+            return fast_values
 
         reference_var = float(reference_values.var())
         if np.isclose(reference_var, 0.0):

@@ -333,6 +333,132 @@ def _center_and_scale_random_effect(values: np.ndarray, target_var: float,
     return values * np.sqrt(target_var / current_var)
 
 
+def is_identity_matrix(M: np.ndarray, tol: float = 1e-8) -> bool:
+    '''
+    Returns True if M is numerically close to an identity matrix.
+    '''
+    M = np.asarray(M, dtype=float)
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        return False
+    if not np.allclose(np.diag(M), 1.0, atol=tol):
+        return False
+    off_diag = M - np.diag(np.diag(M))
+    return np.allclose(off_diag, 0.0, atol=tol)
+
+
+def get_group_assignments_from_design(Z: np.ndarray, tol: float = 1e-8) -> Optional[np.ndarray]:
+    '''
+    If Z is a one-hot membership matrix with at most one cluster per individual,
+    returns compact cluster assignments; otherwise returns None.
+    '''
+    Z = np.asarray(Z, dtype=float)
+    if Z.ndim != 2:
+        return None
+    if Z.shape[0] == 0:
+        return np.array([], dtype=np.int32)
+
+    row_sums = Z.sum(axis=1)
+    if not np.allclose(row_sums, np.round(row_sums), atol=tol):
+        return None
+    if np.any(row_sums < -tol) or np.any(row_sums > 1.0 + tol):
+        return None
+
+    if not np.allclose(Z, np.round(Z), atol=tol):
+        return None
+
+    assignments = np.full(Z.shape[0], -1, dtype=np.int32)
+    assigned = row_sums > tol
+    if np.any(assigned):
+        assignments[assigned] = np.argmax(Z[assigned], axis=1).astype(np.int32, copy=False)
+        rows = np.arange(Z.shape[0], dtype=np.int32)[assigned]
+        if not np.allclose(Z[rows, assignments[assigned]], 1.0, atol=tol):
+            return None
+    return assignments
+
+
+def apply_identity_cluster_kernel_sqrt(assignments: np.ndarray, y: np.ndarray) -> np.ndarray:
+    '''
+    Applies K^{1/2} for K = Z Z^T where Z encodes one-hot cluster membership.
+    '''
+    assignments = np.asarray(assignments, dtype=np.int32)
+    y = np.asarray(y, dtype=float)
+    if assignments.ndim != 1 or y.ndim != 1 or assignments.shape[0] != y.shape[0]:
+        raise ValueError('assignments and y must be 1D arrays of the same length.')
+
+    out = np.zeros_like(y, dtype=float)
+    valid = assignments >= 0
+    if not np.any(valid):
+        return out
+
+    cluster_sizes = np.bincount(assignments[valid])
+    cluster_sums = np.bincount(assignments[valid], weights=y[valid], minlength=cluster_sizes.shape[0])
+    out[valid] = cluster_sums[assignments[valid]] / np.sqrt(cluster_sizes[assignments[valid]])
+    return out
+
+
+def get_identity_cluster_kernel_trace(assignments: np.ndarray) -> float:
+    '''
+    Returns trace(K) / N for K = Z Z^T induced by one-hot cluster assignments.
+    '''
+    assignments = np.asarray(assignments, dtype=np.int32)
+    if assignments.ndim != 1:
+        raise ValueError('assignments must be a 1D array.')
+    if assignments.shape[0] == 0:
+        return 0.0
+    return float(np.mean(assignments >= 0))
+
+
+def _calibrate_random_fixed_loading_from_propagated(u_fixed: np.ndarray,
+                                                    propagated: np.ndarray,
+                                                    trace_random: float,
+                                                    target_corr: float,
+                                                    fixed_name: str,
+                                                    random_name: str) -> float:
+    '''
+    Returns the latent loading needed for one random effect to attain a desired
+    observed correlation with one fixed/replaced effect, given the propagated
+    fixed latent field S_random @ y_fixed.
+    '''
+    if np.isclose(target_corr, 0.0):
+        return 0.0
+
+    if np.isclose(u_fixed.var(), 0.0):
+        raise ValueError(
+            f'Cannot correlate random effect {random_name} with zero-variance fixed effect {fixed_name}.'
+        )
+
+    propagated = np.asarray(propagated, dtype=float) - np.mean(propagated)
+    propagated_var = float(propagated.var())
+    if np.isclose(propagated_var, 0.0):
+        warnings.warn(
+            f'Fixed effect {fixed_name} has no overlap with the kernel of random effect {random_name}; '
+            'the requested cross-effect correlation will be set to 0.',
+            stacklevel=2,
+        )
+        return 0.0
+
+    observed_cov = float(np.mean(u_fixed * propagated))
+    max_corr = observed_cov / np.sqrt(float(u_fixed.var()) * propagated_var)
+    max_corr = float(np.clip(max_corr, -1.0, 1.0))
+    clipped_target = float(np.clip(target_corr, -abs(max_corr), abs(max_corr)))
+    if not np.isclose(clipped_target, target_corr):
+        warnings.warn(
+            f'Requested correlation {target_corr:.3f} between {fixed_name} and {random_name} '
+            f'exceeds the feasible magnitude {abs(max_corr):.3f}; clipping to {clipped_target:.3f}.',
+            stacklevel=2,
+        )
+
+    numerator = clipped_target ** 2 * trace_random
+    denominator = (observed_cov ** 2 / float(u_fixed.var())) - clipped_target ** 2 * (
+        propagated_var - trace_random
+    )
+
+    if denominator <= 0:
+        return float(np.sign(clipped_target))
+    rho_sq = float(np.clip(numerator / denominator, 0.0, 1.0))
+    return float(np.sign(clipped_target) * np.sqrt(rho_sq))
+
+
 def _get_kappa(Ks: list[np.ndarray], Ss: list[np.ndarray]) -> np.ndarray:
     '''
     Returns the maximum attainable observed cross-effect correlation under the
@@ -432,45 +558,15 @@ def _calibrate_random_fixed_loading(u_fixed: np.ndarray, y_fixed: np.ndarray,
     Returns the latent loading needed for one random effect to attain a desired
     observed correlation with one fixed/replaced effect.
     '''
-    if np.isclose(target_corr, 0.0):
-        return 0.0
-
-    if np.isclose(u_fixed.var(), 0.0):
-        raise ValueError(
-            f'Cannot correlate random effect {random_name} with zero-variance fixed effect {fixed_name}.'
-        )
-
     propagated = S_random @ y_fixed
-    propagated = propagated - propagated.mean()
-    propagated_var = float(propagated.var())
-    if np.isclose(propagated_var, 0.0):
-        warnings.warn(
-            f'Fixed effect {fixed_name} has no overlap with the kernel of random effect {random_name}; '
-            'the requested cross-effect correlation will be set to 0.',
-            stacklevel=2,
-        )
-        return 0.0
-
-    observed_cov = float(np.mean(u_fixed * propagated))
-    max_corr = observed_cov / np.sqrt(float(u_fixed.var()) * propagated_var)
-    max_corr = float(np.clip(max_corr, -1.0, 1.0))
-    clipped_target = float(np.clip(target_corr, -abs(max_corr), abs(max_corr)))
-    if not np.isclose(clipped_target, target_corr):
-        warnings.warn(
-            f'Requested correlation {target_corr:.3f} between {fixed_name} and {random_name} '
-            f'exceeds the feasible magnitude {abs(max_corr):.3f}; clipping to {clipped_target:.3f}.',
-            stacklevel=2,
-        )
-
-    numerator = clipped_target ** 2 * trace_random
-    denominator = (observed_cov ** 2 / float(u_fixed.var())) - clipped_target ** 2 * (
-        propagated_var - trace_random
+    return _calibrate_random_fixed_loading_from_propagated(
+        u_fixed=u_fixed,
+        propagated=propagated,
+        trace_random=trace_random,
+        target_corr=target_corr,
+        fixed_name=fixed_name,
+        random_name=random_name,
     )
-
-    if denominator <= 0:
-        return float(np.sign(clipped_target))
-    rho_sq = float(np.clip(numerator / denominator, 0.0, 1.0))
-    return float(np.sign(clipped_target) * np.sqrt(rho_sq))
 
 
 def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: list[float],
