@@ -868,6 +868,58 @@ def compute_K_IBD(Haplos: np.ndarray, standardize: bool = False) -> np.ndarray:
         K_IBD = (K_IBD - K0) / (1 - K0)
     return K_IBD
 
+
+def greedy_unrelated_subset(relatedness: np.ndarray,
+                            max_relatedness: float) -> np.ndarray:
+    '''
+    Returns a greedy maximal set of individuals whose pairwise relatedness does not
+    exceed `max_relatedness`.
+    Parameters:
+        relatedness (2D array): Square pairwise relatedness matrix, such as a SNP GRM
+            or true-IBD relatedness matrix.
+        max_relatedness (float): Maximum allowed off-diagonal relatedness between any
+            retained pair.
+    Returns:
+        i_keep (1D int array): Sorted indices of a greedy maximal unrelated subset.
+    Notes:
+        The routine constructs a graph connecting pairs with relatedness greater than
+        `max_relatedness`, then greedily keeps low-degree vertices and removes their
+        neighbors. This yields a maximal independent set, though not necessarily the
+        globally largest one.
+    '''
+    relatedness = np.asarray(relatedness, dtype=float)
+    if relatedness.ndim != 2 or relatedness.shape[0] != relatedness.shape[1]:
+        raise ValueError('`relatedness` must be a square 2D array.')
+    if not np.isfinite(relatedness).all():
+        raise ValueError('`relatedness` must contain only finite values.')
+
+    N = relatedness.shape[0]
+    adjacency = relatedness > max_relatedness
+    np.fill_diagonal(adjacency, False)
+
+    active = np.ones(N, dtype=bool)
+    keep = []
+
+    while np.any(active):
+        active_i = np.flatnonzero(active)
+        adj_active = adjacency[np.ix_(active_i, active_i)]
+        degrees = adj_active.sum(axis=1)
+        weighted_degree = np.where(
+            adj_active,
+            relatedness[np.ix_(active_i, active_i)],
+            0.0,
+        ).sum(axis=1)
+
+        order = np.lexsort((active_i, weighted_degree, degrees))
+        chosen = int(active_i[order[0]])
+        keep.append(chosen)
+
+        neighbors = adjacency[chosen] & active
+        active[chosen] = False
+        active[neighbors] = False
+
+    return np.array(sorted(keep), dtype=np.int32)
+
 @dataclass
 class IBDSegment:
     #i: int = field(init=False) # index of individual i, not necessary

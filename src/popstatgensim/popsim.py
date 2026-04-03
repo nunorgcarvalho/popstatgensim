@@ -363,6 +363,224 @@ class Population:
         '''
         self.GRM = pop.compute_GRM(self.X)
 
+    def get_relatedness_matrix(self, source: str = 'GRM',
+                               standardize_ibd: bool = False) -> np.ndarray:
+        '''
+        Returns a pairwise relatedness matrix for the current population.
+        Parameters:
+            source (str): Which relatedness measure to use. Options are:
+                - 'GRM' (default): SNP-based genomic relationship matrix from `Population.X`.
+                - 'IBD': True relatedness from tracked haplotype IDs.
+            standardize_ibd (bool): Passed to `pop.compute_K_IBD()` when
+                `source='IBD'`. Default is False.
+        Returns:
+            relatedness (2D array): N*N relatedness matrix.
+        '''
+        source = source.upper()
+        if source == 'GRM':
+            if hasattr(self, 'GRM') and self.GRM is not None:
+                return np.asarray(self.GRM, dtype=float)
+            return np.asarray(pop.compute_GRM(self.X), dtype=float)
+        if source == 'IBD':
+            return np.asarray(
+                pop.compute_K_IBD(self.Haplos, standardize=standardize_ibd),
+                dtype=float,
+            )
+        raise ValueError("source must be either 'GRM' or 'IBD'.")
+
+    def subset_individuals(self, i_keep: np.ndarray,
+                           keep_past_generations: int = 0) -> 'Population':
+        '''
+        Returns a new Population object containing only the specified individuals.
+        Parameters:
+            i_keep (1D int or bool array): Individuals to retain. Boolean masks must
+                have length `Population.N`.
+            keep_past_generations (int): Number of past generations to preserve.
+                Parent generations are recursively subset to the ancestors referenced by
+                the retained individuals when available. Default is 0.
+        Returns:
+            Population: Subsetted population.
+        '''
+        i_keep = np.asarray(i_keep)
+        if i_keep.ndim != 1:
+            raise ValueError('`i_keep` must be a 1D index array or boolean mask.')
+        if i_keep.dtype == bool:
+            if i_keep.shape[0] != self.N:
+                raise ValueError('Boolean `i_keep` mask must have length Population.N.')
+            i_keep = np.flatnonzero(i_keep)
+        else:
+            i_keep = i_keep.astype(np.int64, copy=False)
+
+        if i_keep.size == 0:
+            raise ValueError('Must retain at least one individual.')
+        if np.any(i_keep < 0) or np.any(i_keep >= self.N):
+            raise IndexError('`i_keep` contains indices outside the population.')
+        if np.unique(i_keep).size != i_keep.size:
+            raise ValueError('`i_keep` cannot contain duplicate indices.')
+
+        H_new = self.H[i_keep, :, :]
+        new_pop = Population.from_H(
+            H_new,
+            keep_past_generations=keep_past_generations,
+            track_pedigree=self.track_pedigree and keep_past_generations > 0,
+            track_haplotypes=self.track_haplotypes,
+            metric_retention=self.metric_retention,
+            metric_last_k=self.metric_last_k,
+        )
+
+        new_pop.R = self.R.copy()
+        new_pop.BPs = self.BPs.copy()
+        new_pop.t = self.t
+        new_pop.T_breaks = copy.deepcopy(self.T_breaks)
+        new_pop.K = self.K[np.ix_(i_keep, i_keep)].copy()
+
+        if self.track_haplotypes and self.Haplos is not None:
+            new_pop.Haplos = self.Haplos[i_keep, :, :].copy()
+        if self._X is not None:
+            new_pop.X = self._X[i_keep, :].copy()
+        if hasattr(self, 'GRM') and self.GRM is not None:
+            new_pop.GRM = self.GRM[np.ix_(i_keep, i_keep)].copy()
+
+        idx_map = np.full(self.N, -1, dtype=np.int32)
+        idx_map[i_keep] = np.arange(i_keep.size, dtype=np.int32)
+
+        parent_map = None
+        parent_source = self.relations.get('parent_source', 'past')
+        source_parents = np.asarray(self.relations['parents'], dtype=np.int32)
+        if (keep_past_generations > 0 and parent_source == 'past'
+                and self.past is not None and len(self.past) > 1
+                and self.past[1] is not None):
+            parent_keep = np.unique(source_parents[i_keep][source_parents[i_keep] >= 0])
+            if parent_keep.size > 0:
+                new_parent = self.past[1].subset_individuals(
+                    parent_keep,
+                    keep_past_generations=keep_past_generations - 1,
+                )
+                new_pop.past[1] = new_parent
+                for gen in range(2, keep_past_generations + 1):
+                    prev_gen = new_pop.past[gen - 1]
+                    if prev_gen is None or prev_gen.past is None or len(prev_gen.past) < 2:
+                        break
+                    new_pop.past[gen] = prev_gen.past[1]
+
+                parent_N_old = int(self.relations.get('parent_N', self.past[1].N))
+                parent_map = np.full(parent_N_old, -1, dtype=np.int32)
+                parent_map[parent_keep] = np.arange(parent_keep.size, dtype=np.int32)
+
+        relations_new = pop.initialize_relations(new_pop.N)
+
+        spouse_ids = np.asarray(self.relations['spouses'], dtype=np.int32)[i_keep]
+        spouse_new = np.full(new_pop.N, -1, dtype=np.int32)
+        valid_spouse = spouse_ids >= 0
+        spouse_new[valid_spouse] = idx_map[spouse_ids[valid_spouse]]
+        spouse_new[spouse_new < 0] = -1
+        relations_new['spouses'] = spouse_new
+
+        family_ids = np.asarray(self.relations['full_sibs'], dtype=np.int32)[i_keep]
+        full_sibs_new = np.full(new_pop.N, -1, dtype=np.int32)
+        valid_family = family_ids >= 0
+        if np.any(valid_family):
+            _, inverse = np.unique(family_ids[valid_family], return_inverse=True)
+            full_sibs_new[valid_family] = inverse.astype(np.int32)
+        relations_new['full_sibs'] = full_sibs_new
+
+        parents_new = np.full((new_pop.N, 2), -1, dtype=np.int32)
+        parents_old = source_parents[i_keep, :]
+        valid_parents = parents_old >= 0
+        if parent_source == 'current':
+            parents_new[valid_parents] = idx_map[parents_old[valid_parents]]
+            parents_new[parents_new < 0] = -1
+            relations_new['parent_N'] = new_pop.N
+            relations_new['parent_source'] = 'current'
+        elif parent_map is not None and new_pop.past[1] is not None:
+            parents_new[valid_parents] = parent_map[parents_old[valid_parents]]
+            parents_new[parents_new < 0] = -1
+            relations_new['parent_N'] = new_pop.past[1].N
+            relations_new['parent_source'] = 'past'
+        relations_new['parents'] = parents_new
+        new_pop.relations = relations_new
+
+        if (self.track_pedigree and keep_past_generations > 0
+                and new_pop.past[1] is not None and np.any(parents_new >= 0)):
+            new_pop.ped = Pedigree(
+                new_pop.N,
+                par_idx=relations_new['parents'],
+                par_Ped=new_pop.past[1].ped,
+            )
+            new_pop.ped.construct_paths()
+        else:
+            new_pop.ped = Pedigree(new_pop.N)
+
+        new_pop.traits = {}
+        for name, trait in self.traits.items():
+            trait_new = trait.index_trait(i_keep, self.G, G_already_indexed=False)
+            trait_new.pop = new_pop
+            trait_new.name = name
+            new_pop.traits[name] = trait_new
+
+        return new_pop
+
+    def find_unrelated_individuals(self, threshold: float,
+                                   source: str = 'GRM',
+                                   relatedness: np.ndarray = None,
+                                   standardize_ibd: bool = False) -> np.ndarray:
+        '''
+        Returns a greedy maximal subset of individuals with pairwise relatedness at
+        or below the specified threshold.
+        Parameters:
+            threshold (float): Maximum allowed off-diagonal relatedness.
+            source (str): Relatedness source to use when `relatedness` is not
+                provided. Options are 'GRM' (default) and 'IBD'.
+            relatedness (2D array): Optional precomputed relatedness matrix.
+            standardize_ibd (bool): Passed to `get_relatedness_matrix()` when
+                `source='IBD'`.
+        Returns:
+            i_keep (1D int array): Indices of retained individuals.
+        '''
+        if relatedness is None:
+            relatedness = self.get_relatedness_matrix(
+                source=source,
+                standardize_ibd=standardize_ibd,
+            )
+        return pop.greedy_unrelated_subset(relatedness, threshold)
+
+    def prune_related_individuals(self, threshold: float,
+                                  source: str = 'GRM',
+                                  relatedness: np.ndarray = None,
+                                  standardize_ibd: bool = False,
+                                  keep_past_generations: int = 0,
+                                  return_indices: bool = False):
+        '''
+        Returns a subsetted population in which all retained pairs have relatedness at
+        or below `threshold`.
+        Parameters:
+            threshold (float): Maximum allowed off-diagonal relatedness.
+            source (str): Relatedness source used when `relatedness` is not supplied.
+                Options are 'GRM' (default) and 'IBD'.
+            relatedness (2D array): Optional precomputed relatedness matrix.
+            standardize_ibd (bool): Passed to `get_relatedness_matrix()` when
+                `source='IBD'`.
+            keep_past_generations (int): Number of past generations to preserve in the
+                returned population. Default is 0.
+            return_indices (bool): If True, also returns the retained indices in the
+                original population.
+        Returns:
+            Population or tuple: The pruned population, optionally along with `i_keep`.
+        '''
+        i_keep = self.find_unrelated_individuals(
+            threshold=threshold,
+            source=source,
+            relatedness=relatedness,
+            standardize_ibd=standardize_ibd,
+        )
+        pop_new = self.subset_individuals(
+            i_keep=i_keep,
+            keep_past_generations=keep_past_generations,
+        )
+        if return_indices:
+            return (pop_new, i_keep)
+        return pop_new
+
     def get_RDR_SNP_GRMs(self, G_par: np.ndarray = None) -> list:
         '''
         Constructs the three SNP-based GRMs used for Related Disequilibrium Regression (RDR). This could be done more efficiently by reusing intermediate calculations, but is currently implemented in a straightforward way for clarity.\
@@ -525,12 +743,11 @@ class Population:
 
     def assign_sex(self):
         '''
-        Randomly assigns half of individuals to being female (0) and other half to being male (1). Requires population size to be even.
+        Randomly assigns individuals to being female (0) or male (1), keeping the
+        counts as balanced as possible.
         '''
-        if self.N % 2 != 0:
-            raise Exception('Population size must be even to assign sex equally and for mating purposes.')
         sex_arr = np.zeros(self.N, dtype=np.uint8)
-        # randomly assigns exactly half of indices to be 1s
+        # randomly assigns as close as possible to half of indices to be 1s
         sex_arr[np.random.choice(self.N, self.N // 2, replace=False)] = 1
         # adds sex as a Trait object (with name 'sex')
         self.add_trait_from_fixed_values(name='sex', y=sex_arr)
@@ -2707,24 +2924,7 @@ class SuperPopulation:
             # gets indices of individuals for the new population
             i_end = i_start + N_new[i]
             i_new = i_shuffled[i_start:i_end]
-            # creates new population from the haplotypes of the original population
-            H_new = source.H[i_new, :, :]
-            new_pop = Population.from_H(
-                H_new,
-                track_haplotypes=source.track_haplotypes,
-                metric_retention=source.metric_retention,
-                metric_last_k=source.metric_last_k,
-            )
-            if source.track_haplotypes and source.Haplos is not None:
-                new_pop.Haplos = source.Haplos[i_new, :, :].copy()
-            # updates traits
-            for name, trait in source.traits.items():
-                trait_new = trait.index_trait(i_new, source.G, G_already_indexed=False)
-                trait_new.pop = new_pop
-                trait_new.name = name
-                new_pop.traits[name] = trait_new
-            
-            new_pops.append( new_pop )
+            new_pops.append(source.subset_individuals(i_new, keep_past_generations=0))
             # updates next index to start pulling from
             i_start = i_end
         # adds new population to the superpopulation
