@@ -1462,6 +1462,162 @@ class FixedEffect(Effect):
         return values * np.sqrt(self.var / current_var)
 
 
+class CorrelatedRandomEffect(Effect):
+    '''
+    Generates one random effect whose realized values are correlated with an
+    already-realized component or trait.
+    '''
+
+    def __init__(self, name: str, var: float, r: float,
+                 reference_component: str = None, reference_trait: str = None,
+                 cluster_source: Union[str, np.ndarray] = None,
+                 Z: np.ndarray = None, A: np.ndarray = None):
+        super().__init__(name)
+        self.var = float(var)
+        self.r = float(r)
+        self.reference_component = reference_component
+        self.reference_trait = reference_trait
+        self.cluster_source = copy.deepcopy(cluster_source)
+        self.Z = None if Z is None else np.asarray(Z, dtype=float).copy()
+        self.A = None if A is None else np.asarray(A, dtype=float).copy()
+        self.required_inputs = ('N',)
+
+        if self.var < 0:
+            raise ValueError(f'var must be non-negative for correlated random effect {name}.')
+        if abs(self.r) > 1:
+            raise ValueError(f'r must be between -1 and 1 for correlated random effect {name}.')
+        if self.reference_trait is None and self.reference_component is None:
+            raise ValueError(
+                f'Correlated random effect {name} must reference either a component in the same trait '
+                'or a component/trait in another trait.'
+            )
+
+    def _reference_label(self) -> str:
+        if self.reference_trait is None:
+            return self.reference_component
+        if self.reference_component is None:
+            return self.reference_trait
+        return f'{self.reference_trait}.{self.reference_component}'
+
+    def _resolve_reference_values(self, inputs: dict, pop: Population = None) -> np.ndarray:
+        if self.reference_trait is None:
+            trait_components = inputs.get('_trait_components')
+            if trait_components is None or self.reference_component not in trait_components:
+                raise ValueError(
+                    f"Correlated random effect {self.name} requires component "
+                    f"'{self.reference_component}' to be generated earlier in the same trait."
+                )
+            values = trait_components[self.reference_component]
+        else:
+            if pop is None:
+                raise ValueError(
+                    f"Correlated random effect {self.name} requires a Population object "
+                    'when referencing another trait.'
+                )
+            if self.reference_trait not in pop.traits:
+                raise ValueError(
+                    f"Trait '{self.reference_trait}' was not found in the population for "
+                    f"correlated random effect {self.name}."
+                )
+            reference_trait = pop.traits[self.reference_trait]
+            if self.reference_component is None:
+                values = reference_trait.y
+            else:
+                if self.reference_component not in reference_trait.y_:
+                    raise ValueError(
+                        f"Trait '{self.reference_trait}' does not contain component "
+                        f"'{self.reference_component}' for correlated random effect {self.name}."
+                    )
+                values = reference_trait.y_[self.reference_component]
+
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1:
+            raise ValueError(f'Reference values for correlated random effect {self.name} must be 1D.')
+        return values
+
+    def _resolve_kernel(self, N: int, pop: Population = None) -> tuple[np.ndarray, np.ndarray]:
+        if self.Z is not None:
+            Z = np.asarray(self.Z, dtype=float)
+            if Z.ndim != 2:
+                raise ValueError(f'Z must be a 2D array for correlated random effect {self.name}.')
+            if Z.shape[0] != N:
+                raise ValueError(
+                    f'Z for correlated random effect {self.name} must have {N} rows.'
+                )
+            A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            return (Z, A)
+
+        if self.cluster_source is None:
+            A = np.eye(N, dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            return (None, A)
+
+        if isinstance(self.cluster_source, str):
+            if pop is None:
+                raise ValueError(
+                    f"Correlated random effect {self.name} requires a Population object "
+                    f"to resolve cluster_source='{self.cluster_source}'."
+                )
+            if self.cluster_source not in pop.relations:
+                raise ValueError(
+                    f"cluster_source='{self.cluster_source}' was not found in Population.relations "
+                    f"for correlated random effect {self.name}."
+                )
+            groups = np.asarray(pop.relations[self.cluster_source])
+        else:
+            groups = np.asarray(self.cluster_source)
+
+        if groups.ndim != 1 or groups.shape[0] != N:
+            raise ValueError(
+                f'cluster_source for correlated random effect {self.name} must resolve to a length-{N} 1D array.'
+            )
+
+        Z = stat.build_design_matrix_from_groups(groups)
+        A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+        return (Z, A)
+
+    def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
+        '''
+        Generates a random effect correlated with one previously realized reference.
+        '''
+        if 'N' not in inputs:
+            raise ValueError(f"Missing required input 'N' for effect {self.name}.")
+        N = int(inputs['N'])
+
+        reference_values = self._resolve_reference_values(inputs, pop=pop)
+        if reference_values.shape[0] != N:
+            raise ValueError(
+                f'Reference values for correlated random effect {self.name} have incompatible length.'
+            )
+
+        Z, A = self._resolve_kernel(N=N, pop=pop)
+
+        reference_var = float(reference_values.var())
+        if np.isclose(reference_var, 0.0):
+            if not np.isclose(self.r, 0.0):
+                raise ValueError(
+                    f'Correlated random effect {self.name} cannot target non-zero correlation with '
+                    f'zero-variance reference {self._reference_label()}.'
+                )
+            random_effects = stat.get_random_effects(
+                Zs=[Z],
+                As=[A],
+                variances=[self.var],
+                names=[self.name],
+            )
+            return random_effects['values'][self.name]
+
+        reference_name = f'{self.name}__reference'
+        random_effects = stat.get_random_effects(
+            Zs=[None, Z],
+            As=[np.eye(N, dtype=float), A],
+            variances=[reference_var, self.var],
+            C=np.array([[1.0, self.r], [self.r, 1.0]], dtype=float),
+            names=[reference_name, self.name],
+            replace_random=[reference_values, None],
+        )
+        return random_effects['values'][self.name]
+
+
 class NoiseEffect(Effect):
     '''
     Stores the generation rule for a noise component.
@@ -1525,6 +1681,7 @@ class Trait:
             self.effects['Eps'] = NoiseEffect('Eps', var=var_Eps)
 
         self.update_inputs(copy.deepcopy(inputs))
+        self._validate_effect_definitions()
         self.generate_trait()
         self.validate()
 
@@ -1595,6 +1752,8 @@ class Trait:
             self.inputs['N'] = N_current
         elif 'N' in self.inputs:
             self.inputs['N'] = int(self.inputs['N'])
+        elif self.pop is not None:
+            self.inputs['N'] = int(self.pop.N)
         else:
             raise ValueError("Trait input 'N' must always be available.")
 
@@ -1630,6 +1789,106 @@ class Trait:
         for name, value in self.var.items():
             self.var_initial.setdefault(name, value)
 
+    def _validate_effect_definitions(self):
+        '''
+        Validates effect types and dependency ordering independently of realized values.
+        '''
+        if not isinstance(self.effects, dict):
+            raise ValueError('Trait.effects must be a dictionary.')
+        if not isinstance(self.inputs, dict):
+            raise ValueError('Trait.inputs must be a dictionary.')
+
+        trait_names = list(self.pop.traits.keys()) if self.pop is not None else []
+        current_name = self.name
+        if current_name is None and self.pop is not None:
+            for trait_name, trait_obj in self.pop.traits.items():
+                if trait_obj is self:
+                    current_name = trait_name
+                    break
+        effect_order = list(self.effects.keys())
+
+        for idx, (name, effect) in enumerate(self.effects.items()):
+            if name in self.VALID_GENETIC_COMPONENTS:
+                if not isinstance(effect, GeneticEffect):
+                    raise ValueError(f'effects[{name}] must be a GeneticEffect object.')
+            elif name == 'Eps':
+                if not isinstance(effect, NoiseEffect):
+                    raise ValueError('effects[Eps] must be a NoiseEffect object.')
+            elif not isinstance(effect, (FixedEffect, CorrelatedRandomEffect)):
+                raise ValueError(
+                    f'effects[{name}] must be a GeneticEffect, FixedEffect, '
+                    'CorrelatedRandomEffect, or NoiseEffect object.'
+                )
+
+            for input_name in effect.required_inputs:
+                if input_name not in self.inputs:
+                    raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
+
+            if isinstance(effect, FixedEffect) and effect.is_trait and self.pop is not None:
+                if effect.input_name not in self.pop.traits:
+                    raise ValueError(
+                        f"Trait-backed fixed effect '{name}' requires population trait "
+                        f"'{effect.input_name}', but it was not found."
+                    )
+                if current_name in trait_names:
+                    if trait_names.index(effect.input_name) >= trait_names.index(current_name):
+                        raise ValueError(
+                            f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
+                            f"must depend on an earlier trait; got '{effect.input_name}'."
+                        )
+
+            if isinstance(effect, CorrelatedRandomEffect):
+                if isinstance(effect.cluster_source, str) and self.pop is None:
+                    raise ValueError(
+                        f"Correlated random effect '{name}' requires a Population object "
+                        f"to resolve cluster_source='{effect.cluster_source}'."
+                    )
+
+                if effect.reference_trait is None:
+                    if effect.reference_component is None:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' must reference a component "
+                            'when no reference_trait is provided.'
+                        )
+                    if effect.reference_component not in effect_order:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' references unknown same-trait "
+                            f"component '{effect.reference_component}'."
+                        )
+                    if effect_order.index(effect.reference_component) >= idx:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' must come after its referenced "
+                            f"same-trait component '{effect.reference_component}'."
+                        )
+                else:
+                    if current_name is not None and effect.reference_trait == current_name:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' should use reference_trait=None "
+                            'for same-trait component dependencies.'
+                        )
+                    if self.pop is None:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' references another trait and "
+                            'therefore requires a Population object.'
+                        )
+                    if effect.reference_trait not in self.pop.traits:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' references missing trait "
+                            f"'{effect.reference_trait}'."
+                        )
+                    reference_trait = self.pop.traits[effect.reference_trait]
+                    if effect.reference_component is not None and effect.reference_component not in reference_trait.y_:
+                        raise ValueError(
+                            f"Correlated random effect '{name}' references missing component "
+                            f"'{effect.reference_component}' in trait '{effect.reference_trait}'."
+                        )
+                    if current_name in trait_names:
+                        if trait_names.index(effect.reference_trait) >= trait_names.index(current_name):
+                            raise ValueError(
+                                f"Correlated random effect '{name}' in trait '{current_name}' "
+                                f"must depend on an earlier trait; got '{effect.reference_trait}'."
+                            )
+
     def validate(self):
         '''
         Ensures the trait has a consistent internal structure.
@@ -1654,6 +1913,8 @@ class Trait:
         if int(self.inputs['N']) != N:
             raise ValueError("Trait input 'N' is inconsistent with Trait.y.")
 
+        self._validate_effect_definitions()
+
         component_sum = np.zeros(N, dtype=float)
         for name, values in self.y_.items():
             values = np.asarray(values, dtype=float)
@@ -1674,36 +1935,6 @@ class Trait:
             raise ValueError('Trait.y must equal the sum of Trait.y_ components.')
 
         for name, effect in self.effects.items():
-            if name in self.VALID_GENETIC_COMPONENTS:
-                if not isinstance(effect, GeneticEffect):
-                    raise ValueError(f'effects[{name}] must be a GeneticEffect object.')
-            elif name == 'Eps':
-                if not isinstance(effect, NoiseEffect):
-                    raise ValueError('effects[Eps] must be a NoiseEffect object.')
-            elif not isinstance(effect, FixedEffect):
-                raise ValueError(f'effects[{name}] must be a GeneticEffect, FixedEffect, or NoiseEffect object.')
-            for input_name in effect.required_inputs:
-                if input_name not in self.inputs:
-                    raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
-            if isinstance(effect, FixedEffect) and effect.is_trait and self.pop is not None:
-                if effect.input_name not in self.pop.traits:
-                    raise ValueError(
-                        f"Trait-backed fixed effect '{name}' requires population trait "
-                        f"'{effect.input_name}', but it was not found."
-                    )
-                trait_names = list(self.pop.traits.keys())
-                current_name = self.name
-                if current_name is None:
-                    for trait_name, trait_obj in self.pop.traits.items():
-                        if trait_obj is self:
-                            current_name = trait_name
-                            break
-                if current_name in trait_names:
-                    if trait_names.index(effect.input_name) >= trait_names.index(current_name):
-                        raise ValueError(
-                            f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
-                            f"must depend on an earlier trait; got '{effect.input_name}'."
-                        )
             if name not in self.y_:
                 raise ValueError(f'Missing realized component for effect {name}.')
 
@@ -1741,16 +1972,21 @@ class Trait:
         if inputs is not None or kwargs:
             self.update_inputs(inputs=inputs, copy_inputs=False, **kwargs)
 
+        self._validate_effect_definitions()
         self.y_ = {}
         total = None
-        for name, effect in self.effects.items():
-            effect.refresh_from_inputs(self.inputs)
-            values = effect.generate_component(self.inputs, pop=self.pop)
-            self.y_[name] = values
-            if total is None:
-                total = np.array(values, copy=True)
-            else:
-                total += values
+        self.inputs['_trait_components'] = self.y_
+        try:
+            for name, effect in self.effects.items():
+                effect.refresh_from_inputs(self.inputs)
+                values = effect.generate_component(self.inputs, pop=self.pop)
+                self.y_[name] = values
+                if total is None:
+                    total = np.array(values, copy=True)
+                else:
+                    total += values
+        finally:
+            self.inputs.pop('_trait_components', None)
 
         self.y = np.zeros(int(self.inputs['N']), dtype=float) if total is None else total
         self.type = 'composite'

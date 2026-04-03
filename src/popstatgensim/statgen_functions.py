@@ -9,7 +9,7 @@ The functions here contain the documentation for the arguments and return values
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 ##########################
 #### Trait generation ####
@@ -226,271 +226,451 @@ def scale_binary_FE(x: np.ndarray, variance: float) -> np.ndarray:
 #### Random Effects ####
 ########################
 
-# The following function was written (almost) entirely by ChatGPT 5
-def psd_sqrt(M, clip: float = 0.0, pinv: bool = False, eps: float = 1e-12):
-    """
-    Symmetric PSD square root via eigendecomposition.
-    Returns S such that S @ S.T ≈ M (up to numerical error).
-    'clip' floors eigenvalues (e.g., tiny negatives due to roundoff) to this value for the sqrt.
-    'pinv' returns the pseudo inverse square root instead.
-    """
-    M = 0.5 * (M + M.T)  # symmetrize
+def psd_sqrt(M: np.ndarray, clip: float = 0.0,
+             pinv: bool = False, eps: float = 1e-12) -> np.ndarray:
+    '''
+    Returns a symmetric PSD square root or pseudo-inverse square root of a matrix.
+    '''
+    M = np.asarray(M, dtype=float)
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError('Matrix square roots require a square 2D array.')
+
+    M = 0.5 * (M + M.T)
     w, U = np.linalg.eigh(M)
 
-    if not pinv:
-        w_clipped = np.clip(w, clip, None)
-        S = (U * np.sqrt(w_clipped)) @ U.T
-        return 0.5 * (S + S.T)
+    if pinv:
+        tau = eps * max(float(np.max(np.abs(w))), 1.0)
+        vals = np.zeros_like(w)
+        keep = w > tau
+        vals[keep] = 1.0 / np.sqrt(w[keep])
     else:
-        # relative threshold to decide which eigs to keep
-        tau = eps * max(w.max(), 1.0)
-        mask = w > tau
-        invsqrt = np.zeros_like(w)
-        invsqrt[mask] = 1.0 / np.sqrt(w[mask])
-        S_pinv = (U * invsqrt) @ U.T
-        return 0.5 * (S_pinv + S_pinv.T)
+        vals = np.sqrt(np.clip(w, clip, None))
 
-# The following function was written (almost) entirely by ChatGPT 5
-def nearest_correlation_matrix(X, eps_eig=1e-12):
-    """
-    One-shot Higham-style projection to the nearest correlation-like matrix:
-      1) symmetrize
-      2) project to PSD by clipping eigenvalues
-      3) renormalize to unit diagonal (convert covariance -> correlation)
-    Ensures symmetric, PSD, and ones on diagonal.
-    """
+    S = (U * vals) @ U.T
+    return 0.5 * (S + S.T)
+
+
+def nearest_correlation_matrix(X: np.ndarray, eps_eig: float = 1e-12) -> np.ndarray:
+    '''
+    Projects a matrix to the nearest correlation-like matrix by PSD clipping and
+    unit-diagonal rescaling.
+    '''
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2 or X.shape[0] != X.shape[1]:
+        raise ValueError('Correlation projection requires a square 2D array.')
+
     X = 0.5 * (X + X.T)
     w, V = np.linalg.eigh(X)
-    w = np.clip(w, eps_eig, None)  # make PD for a clean Cholesky downstream
+    w = np.clip(w, eps_eig, None)
     Y = (V * w) @ V.T
-    d = np.sqrt(np.diag(Y))
+    d = np.sqrt(np.clip(np.diag(Y), eps_eig, None))
     Dinv = np.diag(1.0 / d)
     Ccorr = Dinv @ Y @ Dinv
     Ccorr = 0.5 * (Ccorr + Ccorr.T)
     np.fill_diagonal(Ccorr, 1.0)
     return Ccorr
 
-# The following function was written (almost) entirely by ChatGPT 5
-def _get_kappa(Ks: list[np.ndarray],Ss: list[np.ndarray]) -> np.ndarray:
-    # We want the *observed* across-individual Pearson correlation between u_i and u_j
-    # to match the input C[i,j]. Under the LMC construction (below), its expectation is
-    #   E[corr(u_i, u_j)] ≈ C_input[i,j] * kappa[i,j]
-    # where: kappa[i,j] = tr(S_i S_j) / sqrt(tr(S_i S_i) tr(S_j S_j))
-    # and: tr(S_i S_i) = tr(K_i) because S_i S_i^T = K_i.
+
+def build_design_matrix_from_groups(groups: np.ndarray, missing_value: int = -1,
+                                    dtype: np.dtype = float,
+                                    return_labels: bool = False):
+    '''
+    Builds an N*K design matrix from compact cluster identifiers.
+    Parameters:
+        groups (1D array): Cluster labels for each individual. Entries equal to
+            `missing_value` are treated as unassigned and receive all-zero rows.
+        missing_value (int): Sentinel value for unassigned individuals. Default is -1.
+        dtype (numpy dtype): Output dtype for the design matrix.
+        return_labels (bool): If True, also returns the unique cluster labels.
+    Returns:
+        Z (2D array): N*K design matrix.
+        labels (1D array): Returned only when `return_labels=True`.
+    '''
+    groups = np.asarray(groups)
+    if groups.ndim != 1:
+        raise ValueError('groups must be a 1D array of cluster identifiers.')
+
+    valid = groups != missing_value
+    labels = np.unique(groups[valid])
+    Z = np.zeros((groups.shape[0], labels.shape[0]), dtype=dtype)
+    if labels.shape[0] > 0:
+        _, inverse = np.unique(groups[valid], return_inverse=True)
+        Z[np.where(valid)[0], inverse] = 1
+
+    if return_labels:
+        return (Z, labels)
+    return Z
+
+
+def _standardize_correlation_matrix(C: np.ndarray, name: str,
+                                    tol: float = 1e-8) -> np.ndarray:
+    C = np.asarray(C, dtype=float)
+    if C.ndim != 2 or C.shape[0] != C.shape[1]:
+        raise ValueError(f'{name} must be a square 2D array.')
+
+    C = 0.5 * (C + C.T)
+    if C.shape[0] > 0 and not np.allclose(np.diag(C), 1.0, atol=tol):
+        raise ValueError(f'{name} must have ones on the diagonal.')
+
+    eigvals = np.linalg.eigvalsh(C)
+    if eigvals.min(initial=0.0) < -tol:
+        raise ValueError(f'{name} must be positive semidefinite.')
+    return C
+
+
+def _center_and_scale_random_effect(values: np.ndarray, target_var: float,
+                                    name: str) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f'Random effect {name} must be a 1D array.')
+
+    values = values - values.mean()
+    current_var = float(values.var())
+    if np.isclose(target_var, 0.0):
+        return np.zeros_like(values)
+    if np.isclose(current_var, 0.0):
+        raise ValueError(f'Random effect {name} has zero variance and cannot be rescaled.')
+    return values * np.sqrt(target_var / current_var)
+
+
+def _get_kappa(Ks: list[np.ndarray], Ss: list[np.ndarray]) -> np.ndarray:
+    '''
+    Returns the maximum attainable observed cross-effect correlation under the
+    latent-kernel construction used below.
+    '''
     M = len(Ks)
-    trKi = np.array([np.trace(Ks[i]) for i in range(M)], dtype=float)
+    trK = np.array([float(np.trace(K_i)) for K_i in Ks], dtype=float)
     kappa = np.eye(M, dtype=float)
     for i in range(M):
-        for j in range(i+1, M):
-            kij = float(np.trace(Ss[i] @ Ss[j]) / np.sqrt(trKi[i] * trKi[j]))
-            # numerical guard into [0,1]
-            kij = min(max(kij, 0.0), 1.0)
+        for j in range(i + 1, M):
+            denom = np.sqrt(trK[i] * trK[j])
+            kij = 0.0 if np.isclose(denom, 0.0) else float(np.trace(Ss[i] @ Ss[j]) / denom)
+            kij = float(np.clip(kij, 0.0, 1.0))
             kappa[i, j] = kappa[j, i] = kij
     return kappa
 
-# much of the code related to correlated random effects was written (almost) entirely by ChatGPT 5
+
+def _validate_random_effect_inputs(Zs: list[np.ndarray], As: list[np.ndarray],
+                                   variances: list[float], names: Optional[list[str]],
+                                   replace_random: Optional[list[np.ndarray]]):
+    M = len(As)
+    if M == 0:
+        raise ValueError('At least one random effect must be provided.')
+    if len(variances) != M:
+        raise ValueError('variances must have the same length as As.')
+
+    if Zs is None:
+        Zs = [None] * M
+    elif len(Zs) != M:
+        raise ValueError('Zs must have the same length as As.')
+    else:
+        Zs = list(Zs)
+
+    if names is None:
+        names = [f'RE_{i}' for i in range(M)]
+    elif len(names) != M:
+        raise ValueError('names must have the same length as As.')
+    else:
+        names = list(names)
+
+    if len(set(names)) != len(names):
+        raise ValueError('Random effect names must be unique.')
+
+    if replace_random is None:
+        replace_random = [None] * M
+    else:
+        replace_random = list(replace_random)
+        if len(replace_random) < M:
+            replace_random = replace_random + [None] * (M - len(replace_random))
+        elif len(replace_random) > M:
+            raise ValueError('replace_random must have length at most M.')
+
+    vars_arr = np.asarray(variances, dtype=float)
+    if np.any(vars_arr < 0):
+        raise ValueError('variances must be non-negative.')
+
+    Zs_valid = []
+    As_valid = []
+    N = None
+    for i in range(M):
+        A_i = _standardize_correlation_matrix(As[i], f'As[{i}]')
+        if Zs[i] is None:
+            Z_i = np.eye(A_i.shape[0], dtype=float)
+        else:
+            Z_i = np.asarray(Zs[i], dtype=float)
+            if Z_i.ndim != 2:
+                raise ValueError(f'Zs[{i}] must be a 2D array.')
+            if Z_i.shape[1] != A_i.shape[0]:
+                raise ValueError(
+                    f'Zs[{i}] has {Z_i.shape[1]} columns, but As[{i}] has size {A_i.shape[0]}.'
+                )
+
+        if N is None:
+            N = Z_i.shape[0]
+        elif Z_i.shape[0] != N:
+            raise ValueError('All design matrices must have the same number of individuals.')
+
+        if replace_random[i] is not None:
+            x_i = np.asarray(replace_random[i], dtype=float)
+            if x_i.ndim != 1 or x_i.shape[0] != N:
+                raise ValueError(
+                    f'replace_random[{i}] must be a length-{N} 1D array.'
+                )
+            replace_random[i] = x_i
+
+        Zs_valid.append(Z_i)
+        As_valid.append(A_i)
+
+    return (Zs_valid, As_valid, vars_arr, names, replace_random, N)
+
+
+def _calibrate_random_fixed_loading(u_fixed: np.ndarray, y_fixed: np.ndarray,
+                                    S_random: np.ndarray, trace_random: float,
+                                    target_corr: float,
+                                    fixed_name: str, random_name: str) -> float:
+    '''
+    Returns the latent loading needed for one random effect to attain a desired
+    observed correlation with one fixed/replaced effect.
+    '''
+    if np.isclose(target_corr, 0.0):
+        return 0.0
+
+    if np.isclose(u_fixed.var(), 0.0):
+        raise ValueError(
+            f'Cannot correlate random effect {random_name} with zero-variance fixed effect {fixed_name}.'
+        )
+
+    propagated = S_random @ y_fixed
+    propagated = propagated - propagated.mean()
+    propagated_var = float(propagated.var())
+    if np.isclose(propagated_var, 0.0):
+        warnings.warn(
+            f'Fixed effect {fixed_name} has no overlap with the kernel of random effect {random_name}; '
+            'the requested cross-effect correlation will be set to 0.',
+            stacklevel=2,
+        )
+        return 0.0
+
+    observed_cov = float(np.mean(u_fixed * propagated))
+    max_corr = observed_cov / np.sqrt(float(u_fixed.var()) * propagated_var)
+    max_corr = float(np.clip(max_corr, -1.0, 1.0))
+    clipped_target = float(np.clip(target_corr, -abs(max_corr), abs(max_corr)))
+    if not np.isclose(clipped_target, target_corr):
+        warnings.warn(
+            f'Requested correlation {target_corr:.3f} between {fixed_name} and {random_name} '
+            f'exceeds the feasible magnitude {abs(max_corr):.3f}; clipping to {clipped_target:.3f}.',
+            stacklevel=2,
+        )
+
+    numerator = clipped_target ** 2 * trace_random
+    denominator = (observed_cov ** 2 / float(u_fixed.var())) - clipped_target ** 2 * (
+        propagated_var - trace_random
+    )
+
+    if denominator <= 0:
+        return float(np.sign(clipped_target))
+    rho_sq = float(np.clip(numerator / denominator, 0.0, 1.0))
+    return float(np.sign(clipped_target) * np.sqrt(rho_sq))
+
+
 def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: list[float],
                        C: np.ndarray = None, names: list[str] = None,
-                       replace_random: list[np.ndarray] = None, debug: bool = False) -> dict:
+                       replace_random: list[np.ndarray] = None,
+                       debug: bool = False) -> dict:
     '''
-    Computes random effects of clusters for a mixed model.
+    Generates one or more random effects with user-specified within-effect kernels
+    and optional between-effect correlations.
     Parameters:
-        Zs (list): List of design matrices for random effects. Each matrix should be N*N_i, where N is the number of individuals and N_i is the number of clusters for that random effect. If None, assumes identity matrix of size N*N (each individual is its own cluster).
-        As (list): List of correlation matrices for each random effect. Each matrix should be N_i*N_i.
-        variances (list): List of variances for each random effect. For component i, random effects are drawn from a normal distribution with mean 0 and covariance given by variances[i] * As[i].
-        C (2D array): Correlation matrix between random effects. Should be M*M, where M is the number of random effects. Default is None, meaning random effects are independent. For random effects to be correlated, the design matrices Zs must be the same for all random effects.
-        names (list): List of names for each random effect. Default is None, meaning names are not used (instead the index is used).
-        replace_random (list): List of length M containing 1-D arrays of length N. If an element is not None, it replaces the randomly generated random effects for that component with the provided values. Correlations between effects are maintained. Note that the algorithm assumes that the respective correlation matrix A provided describes the covariance structure of the provided values. Furthermore, the scores are scaled such that the final values have the variance provided in the `variances` list. Be warned that including more than one replaced random effect may struggle to reproduce the desired correlations between effects. If an element is None, that random effect is generated by the function. Default is None, meaning all random effects are generated randomly. 
-        debug (bool): If True, output contains another dictionary inside it with information relevant for correlated random effects. Default is False.
+        Zs (list): List of N*K_i design matrices. If Zs[i] is None, the identity
+            matrix is used.
+        As (list): List of K_i*K_i cluster-level correlation matrices.
+        variances (list): Target empirical variances for each realized effect.
+        C (2D array): Target observed correlation matrix between realized effects.
+            If None, effects are generated independently.
+        names (list): Optional names for the realized effects.
+        replace_random (list): Optional realized effect values to plug in directly.
+            Each provided vector is centered and rescaled to the corresponding target
+            variance before being used.
+        debug (bool): If True, includes intermediate kernel information.
     Returns:
-        random_effects (dict): Dictionary of relevant pieces of random effects, where each value in the dictionary is a list of the same length as the number of random effects.
+        random_effects (dict): Metadata plus realized values. The realized vectors are
+            available both in `random_effects['u']` and by name in
+            `random_effects['values']`.
     '''
-    M = len(As) # number of components
-    # names components if not given
-    if names is None:
-        names = [f"RE_{i}" for i in range(M)]
-    
-    # checks if A or Z matrices are None
-    for i in range(M):
-        if As[i] is None:
-            raise ValueError("As cannot contain None values. Each random effect must have a correlation matrix.")
-        if Zs[i] is None:
-            Zs[i] = np.identity(As[i].shape[0])
+    Zs, As, vars_arr, names, replace_random, N = _validate_random_effect_inputs(
+        Zs=Zs,
+        As=As,
+        variances=variances,
+        names=names,
+        replace_random=replace_random,
+    )
+    M = len(names)
+    rng = np.random.default_rng()
 
-    # checks if user provided random effects to replace
-    scores = [None] * M
-    i_random = list(range(M)) # indices of random effects
-    i_fixed = [] # indices of fixed effects
-    if replace_random is not None:
-        # this just ensures that the list is of length M, even if user provided a shorter list
+    fixed_idx = [i for i, values in enumerate(replace_random) if values is not None]
+    random_idx = [i for i in range(M) if i not in fixed_idx]
+
+    if C is not None:
+        C = _standardize_correlation_matrix(C, 'C')
+        if C.shape != (M, M):
+            raise ValueError('C must have shape (M, M), where M is the number of random effects.')
+
+    if C is None:
+        us = [None] * M
         for i in range(M):
             if replace_random[i] is not None:
-                scores[i] = replace_random[i]
-                i_fixed.append(i)
-                i_random.remove(i)
+                us[i] = _center_and_scale_random_effect(replace_random[i], vars_arr[i], names[i])
+                continue
 
-    rng = np.random.default_rng()
-    # independent random effects
-    if C is None:
-        us = []
-        # generates random effects for each cluster for each component
-        for i in range(M):
-            N_i = As[i].shape[0]
-            z_i = rng.standard_normal(N_i) # ~ N(0, I_{N_i}), "z-score"
-            L_i = np.linalg.cholesky(0.5*(As[i]+As[i].T) + 1e-12*np.eye(N_i)) # As[i] = L L^T
-            u_i = np.sqrt(variances[i]) * (Zs[i] @ L_i @ z_i) # u_i ~ N(0, var_i Z_i A_i Z_i^T)
-            us.append(u_i)
+            A_i = As[i]
+            if A_i.shape[0] == 0:
+                if np.isclose(vars_arr[i], 0.0):
+                    us[i] = np.zeros(N, dtype=float)
+                    continue
+                raise ValueError(f'Random effect {names[i]} has no clusters but positive target variance.')
 
-    # correlated random effects
-    else:
-        # checks if C is valid
-        if C.shape[0] != M or C.shape[1] != M:
-            raise ValueError("Correlation matrix must be of shape M*M, where M is the number of random effects.")
-        
-        ## step 1: build individual-level kernels & their square roots ##
-        N = Zs[0].shape[0]
-        vars_arr = np.asarray(variances, dtype=float)
+            L_i = np.linalg.cholesky(0.5 * (A_i + A_i.T) + 1e-12 * np.eye(A_i.shape[0]))
+            cluster_scores = L_i @ rng.standard_normal(A_i.shape[0])
+            values = Zs[i] @ cluster_scores
+            us[i] = _center_and_scale_random_effect(values, vars_arr[i], names[i])
 
-        # Individual-level covariance *kernels* (correlations if As are correlations and Z is 0/1)
-        #   K_i = Z_i A_i Z_i^T  (shape N x N)
-        Ks = [Zs[i] @ As[i] @ Zs[i].T for i in range(M)]
+        values_by_name = {name: values for name, values in zip(names, us)}
+        return {
+            'name': names,
+            'names': names,
+            'var': vars_arr.tolist(),
+            'variances': vars_arr.copy(),
+            'corr': None,
+            'Z': Zs,
+            'A': As,
+            'u': us,
+            'values': values_by_name,
+        }
 
-        # Square roots S_i = K_i^{1/2}  (shape N x N)
-        # These are the "feature maps" that carry the within-effect structure for effect i.
-        Ss = [psd_sqrt(Ks[i], clip=0.0) for i in range(M)]
+    Ks = [Z_i @ A_i @ Z_i.T for Z_i, A_i in zip(Zs, As)]
+    Ss = [psd_sqrt(K_i, clip=0.0) for K_i in Ks]
+    trK = np.array([float(np.trace(K_i)) / N for K_i in Ks], dtype=float)
 
-        kappa = _get_kappa(Ks, Ss)  # shape M x M
-        # check if any requested (random) correlations are too high with LMC
-        for a, i in enumerate(i_random):
-            for b, j in enumerate(i_random):
-                if a < b and abs(C[i,j]) > kappa[i,j] + 1e-12:
-                    print(f"|C[{i},{j}]|={abs(C[i,j]):.3f} exceeds kappa={kappa[i,j]:.3f};"
-                          f" will cap at ~{np.sign(C[i,j])*kappa[i,j]:.3f}")
+    for i in range(M):
+        if trK[i] <= 1e-12 and not np.isclose(vars_arr[i], 0.0):
+            raise ValueError(
+                f'Random effect {names[i]} has a zero kernel and cannot realize positive variance.'
+            )
 
+    kappa = _get_kappa(Ks, Ss)
+    us = [None] * M
 
-        # Draw M latent standard normal fields over individuals (each is length-N)
-        Z_latent = rng.standard_normal(size=(N, M))  # columns z_q
-        us = [None] * M # stores random effects (including those that become fixed)
-        R = np.zeros((M, M), dtype=float)
+    Y_fixed = np.zeros((N, len(fixed_idx)), dtype=float)
+    for col, i in enumerate(fixed_idx):
+        u_fixed = _center_and_scale_random_effect(replace_random[i], vars_arr[i], names[i])
+        us[i] = u_fixed
 
-        # replaces columns of random effects with provided values if given
-        for i in i_fixed:
-            # centers provided scores if they're not zero-centered
-            scores_i = scores[i] - scores[i].mean()
-            S_p = psd_sqrt(Ks[i], pinv=True) # K_i^{+1/2}
+        if np.isclose(vars_arr[i], 0.0):
+            continue
 
-            if np.std(scores_i) == 0:
-                raise ValueError(f"Provided random effect for component {i} has zero variance.")
-            # gets equivalent z-score, although this isn't necessarily var=1, but
-            # later when generating u, the variance is correct
-            z_scores_i = (S_p @ scores_i) / np.std(scores_i) 
-            Z_latent[:, i] = z_scores_i # replaces z-score
-            # stores fixed effect
-            us[i] = np.sqrt(vars_arr[i]) * (Ss[i] @ Z_latent[:, i])
+        S_pinv = psd_sqrt(Ks[i], pinv=True)
+        y_fixed = S_pinv @ (u_fixed / np.sqrt(vars_arr[i]))
+        y_fixed = y_fixed - y_fixed.mean()
+        y_var = float(y_fixed.var())
+        if np.isclose(y_var, 0.0):
+            raise ValueError(
+                f'Replaced effect {names[i]} is inconsistent with its kernel and cannot be used for correlation.'
+            )
+        Y_fixed[:, col] = y_fixed / np.sqrt(y_var)
 
-            nu = float((Z_latent[:, i] @ Z_latent[:, i]) / N) # empirical variance
-            # determines the correlation between fixed and real effects
-            for j in i_random:
-                vj = Ss[j] @ Z_latent[:,i] # S_j z_fixed
-                A  = float(us[i] @ vj / (np.linalg.norm(us[i]) + 1e-15))
-                B  = float(vj @ vj)
-                T  = float(np.trace(Ks[j]))
-                c_star = float(C[i, j]) # desired observed corr with fixed effect
-                c_max  = 0.0 if B == 0 else A / np.sqrt(B)
-                c_tgt  = float(np.clip(c_star, -abs(c_max), abs(c_max)))
-                denom  = A*A - c_tgt*c_tgt*(B - nu*T)
-                if denom <= 0:
-                    rho = np.sign(c_tgt) * 1.0
-                else:
-                    rho2 = np.clip((c_tgt*c_tgt)*T / denom, 0.0, 1.0)
-                    rho  = np.sign(c_tgt) * np.sqrt(rho2)
-                R[j, i] = rho
-        # subsets to only (random x fixed) effects
-        R = R[np.ix_(i_random, i_fixed)]
+    R = np.zeros((len(random_idx), len(fixed_idx)), dtype=float)
+    for row, i in enumerate(random_idx):
+        for col, j in enumerate(fixed_idx):
+            R[row, col] = _calibrate_random_fixed_loading(
+                u_fixed=us[j],
+                y_fixed=Y_fixed[:, col],
+                S_random=Ss[i],
+                trace_random=trK[i],
+                target_corr=float(C[i, j]),
+                fixed_name=names[j],
+                random_name=names[i],
+            )
 
-        # Target observed correlation is C; we need to "pre-whiten" it by kappa so that
-        #   observed ≈ C_calibrated ∘ kappa  (∘ = Hadamard on the *M x M* effect space),
-        # i.e., C_calibrated[i,j] = C[i,j] / kappa[i,j] for i != j.
-        # only applicable to non-fixed effects
-        C_cal = C.copy()
-        for i in i_random:
-            for j in i_random:
-                if i == j:
-                    C_cal[i, j] = 1.0
-                else:
-                    if kappa[i, j] > 0:
-                        C_cal[i, j] = np.clip(C[i, j] / kappa[i, j], -1.0, 1.0)
-                    else:
-                        # If kappa=0, the two effects share no common modes; the observed corr must be ~0.
-                        C_cal[i, j] = 0.0
-        # subsets to only random effects
-        C_cal = C_cal[np.ix_(i_random, i_random)]
-        # Project to the nearest valid correlation matrix (symmetric, PSD, diag=1)
-        C_cal = nearest_correlation_matrix(C_cal, eps_eig=1e-12)
+    C_latent = np.eye(len(random_idx), dtype=float)
+    for a, i in enumerate(random_idx):
+        for b, j in enumerate(random_idx):
+            if a >= b:
+                continue
+            kij = kappa[i, j]
+            if kij <= 1e-12:
+                clipped = 0.0
+                raw_latent_target = 0.0
+            else:
+                raw_latent_target = float(C[i, j] / kij)
+                clipped = float(np.clip(raw_latent_target, -1.0, 1.0))
+            if kij <= 1e-12 and not np.isclose(C[i, j], 0.0):
+                warnings.warn(
+                    f'Random effects {names[i]} and {names[j]} have no kernel overlap; '
+                    f'the requested correlation {C[i, j]:.3f} will be set to 0.',
+                    stacklevel=2,
+                )
+            elif not np.isclose(clipped, raw_latent_target):
+                warnings.warn(
+                    f'Requested correlation between {names[i]} and {names[j]} is not feasible '
+                    f'under their kernels; clipping to approximately {clipped * kij:.3f}.',
+                    stacklevel=2,
+                )
+            C_latent[a, b] = C_latent[b, a] = clipped
+    if len(random_idx) > 0:
+        C_latent = nearest_correlation_matrix(C_latent)
 
-        # Build Z_f (N x k) and its Gram G_f (k x k)
-        Z_f = np.column_stack([Z_latent[:, i] for i in i_fixed]) if i_fixed else np.zeros((N,0))
-        # (columns should already be mean ~0 from your centering; optionally enforce)
-        if Z_f.size:
-            Z_f = Z_f - Z_f.mean(axis=0, keepdims=True)
-        G_f = (Z_f.T @ Z_f) / N  # fixed-latent covariance across individuals
+    G_fixed = (Y_fixed.T @ Y_fixed) / N if fixed_idx else np.zeros((0, 0), dtype=float)
+    residual_target = C_latent - R @ G_fixed @ R.T
 
-        # R is (len(i_random) x len(i_fixed))
-        # Target Y-level correlation among random effects after κ-cal:
-        #   Cov(Y_random) target = C_cal
-        # Contribution from fixed cols = R @ G_f @ R^T
-        Res = C_cal - R @ G_f @ R.T
-
-        # Ensure correct diagonals & PSD via correlation projection
-        diag_left = np.clip(np.diag(Res), 0.0, None)
-        s = np.sqrt(diag_left)
+    if len(random_idx) > 0:
+        residual_diag = np.clip(np.diag(residual_target), 0.0, None)
+        scales = np.sqrt(residual_diag)
         with np.errstate(divide='ignore', invalid='ignore'):
-            Dinv = np.diag(np.where(s > 0, 1.0/s, 0.0))
-        Q = Dinv @ Res @ Dinv
-        Q = nearest_correlation_matrix(Q, eps_eig=1e-12)
-        Res_psd = np.diag(s) @ Q @ np.diag(s)
+            Dinv = np.diag(np.where(scales > 0, 1.0 / scales, 0.0))
+        residual_corr = Dinv @ residual_target @ Dinv if len(random_idx) > 0 else residual_target
+        residual_corr = nearest_correlation_matrix(residual_corr) if len(random_idx) > 0 else residual_corr
+        residual_cov = np.diag(scales) @ residual_corr @ np.diag(scales)
+        L_random = np.linalg.cholesky(
+            0.5 * (residual_cov + residual_cov.T) + 1e-12 * np.eye(len(random_idx))
+        )
+    else:
+        residual_cov = np.zeros((0, 0), dtype=float)
+        L_random = np.zeros((0, 0), dtype=float)
 
-        L_random = np.linalg.cholesky(0.5*(Res_psd + Res_psd.T) + 1e-12*np.eye(len(i_random)))
+    latent_noise = rng.standard_normal(size=(N, len(random_idx))) if random_idx else np.zeros((N, 0))
+    Y_random = Y_fixed @ R.T + latent_noise @ L_random.T
 
-        # Makes L lower-triangular by combining fixed and random effects
-        L = np.zeros((M,M), dtype=float)
-        L[np.ix_(i_fixed, i_fixed)] = np.eye(len(i_fixed))
-        L[np.ix_(i_random, i_random)] = L_random
-        L[np.ix_(i_random, i_fixed)] = R
+    for row, i in enumerate(random_idx):
+        raw_values = Ss[i] @ Y_random[:, row]
+        us[i] = _center_and_scale_random_effect(raw_values, vars_arr[i], names[i])
 
-        # Mix them across effects: Y = Z_latent @ L.T, so column i is y_i = sum_q L[i,q] z_q
-        Y = Z_latent @ L.T  # shape (N, M)
-
-        # Build the M random effects: u_i = sqrt(var_i) * S_i @ y_i
-        us = []
-        for i in range(M):
-            u_i = np.sqrt(vars_arr[i]) * (Ss[i] @ Y[:, i])
-            us.append(u_i) 
-        
-        if debug:
-            debug_info = {
-                'K': Ks,
-                'S': Ss,
-                'kappa': kappa,
-                'C_calibrated': C_cal,
-                'C_input': C,
-                'C_observed': np.corrcoef(np.vstack(us)),
-                'Z_latent': Z_latent,
-                'Y': Y,
-                'L': L
-            }
-
-    # creates a dictionary of random effects
+    values_by_name = {name: values for name, values in zip(names, us)}
     random_effects = {
         'name': names,
-        'var': variances,
-        'corr': C,
+        'names': names,
+        'var': vars_arr.tolist(),
+        'variances': vars_arr.copy(),
+        'corr': C.copy(),
         'Z': Zs,
         'A': As,
-        'u': us
+        'K': Ks,
+        'u': us,
+        'values': values_by_name,
     }
-    if debug and C is not None:
-        random_effects['debug'] = debug_info
+
+    if debug:
+        component_matrix = np.column_stack(us)
+        random_effects['debug'] = {
+            'K': Ks,
+            'S': Ss,
+            'kappa': kappa,
+            'C_input': C.copy(),
+            'C_latent_random': C_latent,
+            'latent_fixed': Y_fixed,
+            'fixed_loading': R,
+            'latent_residual_cov': residual_cov,
+            'C_observed': np.corrcoef(component_matrix.T),
+        }
     return random_effects
 
 #################################
