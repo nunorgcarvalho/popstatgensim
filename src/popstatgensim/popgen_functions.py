@@ -7,8 +7,25 @@ The functions here contain the documentation for the arguments and return values
 
 # imports
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy import sparse
+from scipy import linalg
 from dataclasses import dataclass, field
+from typing import Optional, Tuple
+
+
+@dataclass
+class PCAResult:
+    '''
+    Container for PCA outputs on genotype data.
+    '''
+    scores: np.ndarray
+    eigenvalues: np.ndarray
+    singular_values: np.ndarray
+    explained_variance_ratio: np.ndarray
+    n_samples: int
+    n_features: int
+    metadata: dict = field(default_factory=dict)
 
 ################################################
 #### Genotype handling and basic statistics ####
@@ -95,6 +112,210 @@ def compute_GRM(X: np.ndarray) -> np.ndarray:
     # computes GRM
     GRM = (X @ X.T) / M
     return GRM
+
+######################
+#### PCA Analysis ####
+######################
+
+def _validate_pca_axes(pcs: Tuple[int, int]) -> Tuple[int, int]:
+    '''
+    Validates the pair of principal components requested for plotting.
+    '''
+    if len(pcs) != 2:
+        raise ValueError('pcs must contain exactly two principal-component indices.')
+    pc_x, pc_y = (int(pcs[0]), int(pcs[1]))
+    if pc_x < 1 or pc_y < 1:
+        raise ValueError('Principal-component indices must be 1-based positive integers.')
+    if pc_x == pc_y:
+        raise ValueError('pcs must contain two distinct principal components.')
+    return (pc_x, pc_y)
+
+
+def _orient_pca_scores(scores: np.ndarray) -> np.ndarray:
+    '''
+    Flips component signs for more stable plotting orientation across repeated runs.
+    '''
+    scores = np.asarray(scores, dtype=float)
+    for j in range(scores.shape[1]):
+        i_max = int(np.argmax(np.abs(scores[:, j])))
+        if scores[i_max, j] < 0:
+            scores[:, j] *= -1
+    return scores
+
+
+def _format_pc_axis_label(pca: PCAResult, pc: int) -> str:
+    '''
+    Formats an axis label including the variance explained by a principal component.
+    '''
+    explained = 100.0 * float(pca.explained_variance_ratio[pc - 1])
+    return f'PC{pc} ({explained:.2f}%)'
+
+
+def compute_PCA(X: np.ndarray = None, G: np.ndarray = None,
+                p: np.ndarray = None, P: int = 2,
+                n_components: int = 2,
+                impute: bool = True,
+                std_method: str = 'observed') -> PCAResult:
+    '''
+    Computes a PCA on standardized genotypes and returns a compact result object.
+    Parameters:
+        X (2D array): Optional standardized genotype matrix. If provided, must already be
+            centered across individuals.
+        G (2D array): Optional genotype matrix. Used together with `p` and `P` to build `X`
+            if `X` is not provided.
+        p (1D array): Allele frequencies used to standardize `G`.
+        P (int): Ploidy of genotype matrix.
+        n_components (int): Number of leading PCs to compute.
+        impute (bool): Passed to `standardize_G()` when constructing `X` from `G`.
+        std_method (str): Passed to `standardize_G()` when constructing `X` from `G`.
+    Returns:
+        PCAResult: Object containing PC scores and variance-explained summaries.
+    '''
+    if X is None:
+        if G is None or p is None:
+            raise ValueError('Must provide either X or both G and p to compute PCA.')
+        X = standardize_G(G, np.asarray(p, dtype=float), P,
+                          impute=impute, std_method=std_method)
+    elif G is not None or p is not None:
+        raise ValueError('Provide either X or G/p inputs, but not both.')
+
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2:
+        raise ValueError('PCA input matrix must be a 2D array.')
+
+    N, M = X.shape
+    min_dim = min(N, M)
+    if n_components is None:
+        n_components = min_dim
+    n_components = int(n_components)
+    if n_components < 1:
+        raise ValueError('n_components must be at least 1.')
+    if n_components > min_dim:
+        raise ValueError(
+            f'n_components={n_components} exceeds the maximum possible rank {min_dim}.'
+        )
+
+    frob_norm_sq = float(np.sum(X * X))
+    if np.isclose(frob_norm_sq, 0.0):
+        raise ValueError(
+            'PCA cannot be computed because the standardized genotype matrix has zero total variance.'
+        )
+
+    if N <= M:
+        gram = X @ X.T
+        start = N - n_components
+        eigenvalues, eigenvectors = linalg.eigh(
+            gram,
+            subset_by_index=[start, N - 1],
+        )
+        eigenvalues = np.clip(eigenvalues[::-1], 0.0, None)
+        eigenvectors = eigenvectors[:, ::-1]
+        singular_values = np.sqrt(eigenvalues)
+        scores = eigenvectors * singular_values[None, :]
+    else:
+        cov = X.T @ X
+        start = M - n_components
+        eigenvalues, eigenvectors = linalg.eigh(
+            cov,
+            subset_by_index=[start, M - 1],
+        )
+        eigenvalues = np.clip(eigenvalues[::-1], 0.0, None)
+        eigenvectors = eigenvectors[:, ::-1]
+        singular_values = np.sqrt(eigenvalues)
+        scores = X @ eigenvectors
+
+    scores = _orient_pca_scores(scores)
+    explained_variance_ratio = eigenvalues / frob_norm_sq
+
+    return PCAResult(
+        scores=scores,
+        eigenvalues=eigenvalues,
+        singular_values=singular_values,
+        explained_variance_ratio=explained_variance_ratio,
+        n_samples=N,
+        n_features=M,
+    )
+
+
+def plot_PCA(pca: PCAResult, pcs: Tuple[int, int] = (1, 2),
+             values: np.ndarray = None,
+             categorical: Optional[bool] = None,
+             ax=None, title: str = 'PCA',
+             color_label: str = None,
+             alpha: float = 0.8, s: float = 24.0,
+             cmap: str = 'viridis'):
+    '''
+    Plots a pair of principal components from a `PCAResult`.
+    Parameters:
+        pca (PCAResult): PCA result returned by `compute_PCA()`.
+        pcs (tuple): Two 1-based PCs to plot on the x- and y-axes.
+        values (1D array): Optional per-individual values used to color points.
+        categorical (bool): Whether `values` should be treated as categorical. If not
+            provided, non-numeric values are treated as categorical and numeric values as
+            continuous.
+        ax (matplotlib axis): Optional axis to draw on. If not provided, a new figure is
+            created.
+        title (str): Plot title.
+        color_label (str): Label used for the legend or colorbar.
+        alpha (float): Point transparency.
+        s (float): Point size.
+        cmap (str): Colormap used for continuous values.
+    Returns:
+        matplotlib axis: Axis containing the PCA plot.
+    '''
+    pc_x, pc_y = _validate_pca_axes(pcs)
+    if max(pc_x, pc_y) > pca.scores.shape[1]:
+        raise ValueError(
+            f'PCA result only contains {pca.scores.shape[1]} component(s), '
+            f'but pcs={pcs} was requested.'
+        )
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(7, 6))
+
+    x = pca.scores[:, pc_x - 1]
+    y = pca.scores[:, pc_y - 1]
+
+    if values is None:
+        ax.scatter(x, y, alpha=alpha, s=s)
+    else:
+        values = np.asarray(values)
+        if values.ndim != 1:
+            raise ValueError('values must be a 1D array.')
+        if values.shape[0] != pca.scores.shape[0]:
+            raise ValueError('values must have the same length as the number of PCA samples.')
+
+        if categorical is None:
+            categorical = not np.issubdtype(values.dtype, np.number)
+
+        if categorical:
+            unique_values = list(dict.fromkeys(values.tolist()))
+            palette = plt.get_cmap('tab20', max(len(unique_values), 1))
+            for i, value in enumerate(unique_values):
+                mask = values == value
+                ax.scatter(
+                    x[mask], y[mask],
+                    alpha=alpha, s=s,
+                    color=palette(i),
+                    label=str(value),
+                )
+            ax.legend(title=color_label)
+        else:
+            if not np.issubdtype(values.dtype, np.number):
+                raise ValueError('Continuous PCA coloring requires numeric values.')
+            scatter = ax.scatter(
+                x, y,
+                c=values.astype(float),
+                cmap=cmap,
+                alpha=alpha,
+                s=s,
+            )
+            plt.colorbar(scatter, ax=ax, label=color_label)
+
+    ax.set_xlabel(_format_pc_axis_label(pca, pc_x))
+    ax.set_ylabel(_format_pc_axis_label(pca, pc_y))
+    ax.set_title(title)
+    return ax
 
 #####################################
 #### Linkage Disequilibrium (LD) ####

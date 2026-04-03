@@ -394,6 +394,23 @@ class Population:
 
         return [R_oo, R_pp, R_op]
 
+    def compute_PCA(self, n_components: int = 2, **kwargs) -> pop.PCAResult:
+        '''
+        Computes a PCA for the current population.
+        Parameters:
+            n_components (int): Number of leading PCs to compute.
+            **kwargs: Additional arguments passed to `pop.compute_PCA()`.
+        Returns:
+            pop.PCAResult: PCA result object for the current population.
+        '''
+        return pop.compute_PCA(
+            G=self.G,
+            p=self.p,
+            P=self.P,
+            n_components=n_components,
+            **kwargs,
+        )
+
     def add_trait(self, name: str, **kwargs):
         '''
         Initializes and generates a trait from pre-defined Effect objects.
@@ -1107,6 +1124,52 @@ class Population:
     #######################
     #### Visualization ####
     #######################
+
+    def plot_PCA(self, pca: pop.PCAResult = None,
+                 pcs: Tuple[int, int] = (1, 2),
+                 color_by: str = None,
+                 categorical: bool = None,
+                 n_components: int = None,
+                 title: str = 'Population PCA',
+                 **kwargs):
+        '''
+        Plots a PCA for the current population.
+        Parameters:
+            pca (pop.PCAResult): Optional pre-computed PCA result.
+            pcs (tuple): Two 1-based PCs to plot.
+            color_by (str): Optional trait name used to color points.
+            categorical (bool): Whether to treat `color_by` values as categorical.
+                Defaults to treating only `subpop` as categorical unless the trait values
+                are non-numeric.
+            n_components (int): Number of PCs to compute if `pca` is not provided.
+                Defaults to the largest PC index requested in `pcs`.
+            title (str): Plot title.
+            **kwargs: Additional arguments passed to `pop.plot_PCA()`.
+        Returns:
+            matplotlib axis: Axis containing the PCA plot.
+        '''
+        if pca is None:
+            if n_components is None:
+                n_components = max(pcs)
+            pca = self.compute_PCA(n_components=n_components)
+
+        values = None
+        if color_by is not None:
+            if color_by not in self.traits:
+                raise ValueError(f"Trait '{color_by}' was not found in the population.")
+            values = np.asarray(self.traits[color_by].y)
+            if categorical is None and color_by == 'subpop':
+                categorical = True
+
+        return pop.plot_PCA(
+            pca,
+            pcs=pcs,
+            values=values,
+            categorical=categorical,
+            title=title,
+            color_label=color_by,
+            **kwargs,
+        )
 
     def plot_freq_over_time(self, j_keep: tuple = None,
                             legend=False, last_generations: int = None,
@@ -2691,6 +2754,24 @@ class SuperPopulation:
     ################
     #### Traits ####
     ################
+    def _resolve_population_indices(self, pop_i: Union[int, list] = None) -> list:
+        '''
+        Resolves population indices, defaulting to the currently active populations.
+        '''
+        if pop_i is None:
+            pop_i = list(self.active_i)
+        elif isinstance(pop_i, int):
+            pop_i = [pop_i]
+        else:
+            pop_i = list(pop_i)
+
+        if len(pop_i) == 0:
+            raise ValueError('Must select at least one population.')
+        for i in pop_i:
+            if i < 0 or i >= len(self.pops):
+                raise IndexError(f'Population index {i} is out of bounds.')
+        return pop_i
+
     def add_trait(self, name: str, **kwargs):
         '''
         Adds a trait to all active populations in the superpopulation.
@@ -2717,15 +2798,18 @@ class SuperPopulation:
             pop_kwargs = core.get_pop_kwargs(i, **kwargs)
             pop.add_trait(name=name, effects=effects, **pop_kwargs)
 
-    def add_subpop_trait(self):
+    def add_subpop_trait(self, pop_i: Union[int, list] = None):
         '''
-        Adds a permanent trait named `subpop` to each active population in the superpopulation.
-        Each individual in an active population receives the index of that population in
-        the superpopulation's `pops` list.
+        Adds a permanent trait named `subpop` to selected populations in the
+        superpopulation. Each individual receives the index of that population in the
+        superpopulation's `pops` list. Existing `subpop` traits are left unchanged.
         '''
-        for pop_i in self.active_i:
-            pop = self.pops[pop_i]
-            y = np.full(pop.N, pop_i, dtype=int)
+        pop_indices = self._resolve_population_indices(pop_i)
+        for idx in pop_indices:
+            pop = self.pops[idx]
+            if 'subpop' in pop.traits:
+                continue
+            y = np.full(pop.N, idx, dtype=int)
             pop.add_trait_from_fixed_values(name='subpop', y=y, trait_type='permanent')
 
     ####################
@@ -2753,6 +2837,101 @@ class SuperPopulation:
     #######################
     #### Visualization ####
     #######################
+    def compute_PCA(self, pop_i: Union[int, list] = None,
+                    n_components: int = 2, **kwargs) -> pop.PCAResult:
+        '''
+        Computes a PCA across one or more populations in the superpopulation.
+        Parameters:
+            pop_i (int or list): Population indices to include. Defaults to all active
+                populations.
+            n_components (int): Number of leading PCs to compute.
+            **kwargs: Additional arguments passed to `pop.compute_PCA()`.
+        Returns:
+            pop.PCAResult: PCA result object for the selected individuals.
+        '''
+        pop_indices = self._resolve_population_indices(pop_i)
+        pops_selected = [self.pops[i] for i in pop_indices]
+
+        M = pops_selected[0].M
+        P = pops_selected[0].P
+        for pop_sel in pops_selected[1:]:
+            if pop_sel.M != M or pop_sel.P != P:
+                raise ValueError(
+                    'All populations included in a joint PCA must share the same M and P.'
+                )
+
+        G = np.concatenate([pop_sel.G for pop_sel in pops_selected], axis=0)
+        p = pop.compute_freqs(G, P)
+        pca = pop.compute_PCA(
+            G=G,
+            p=p,
+            P=P,
+            n_components=n_components,
+            **kwargs,
+        )
+        pca.metadata['pop_i'] = pop_indices
+        return pca
+
+    def plot_PCA(self, pca: pop.PCAResult = None,
+                 pop_i: Union[int, list] = None,
+                 pcs: Tuple[int, int] = (1, 2),
+                 color_by: str = 'subpop',
+                 categorical: bool = None,
+                 n_components: int = None,
+                 title: str = 'SuperPopulation PCA',
+                 **kwargs):
+        '''
+        Plots a PCA across one or more populations in the superpopulation.
+        Parameters:
+            pca (pop.PCAResult): Optional pre-computed PCA result.
+            pop_i (int or list): Population indices to include. Defaults to all active
+                populations.
+            pcs (tuple): Two 1-based PCs to plot.
+            color_by (str): Trait used to color points. Defaults to `subpop`.
+            categorical (bool): Whether to treat `color_by` values as categorical.
+                Defaults to treating only `subpop` as categorical unless the trait values
+                are non-numeric.
+            n_components (int): Number of PCs to compute if `pca` is not provided.
+                Defaults to the largest PC index requested in `pcs`.
+            title (str): Plot title.
+            **kwargs: Additional arguments passed to `pop.plot_PCA()`.
+        Returns:
+            matplotlib axis: Axis containing the PCA plot.
+        '''
+        pop_indices = self._resolve_population_indices(pop_i)
+        pops_selected = [self.pops[i] for i in pop_indices]
+
+        if color_by == 'subpop':
+            self.add_subpop_trait(pop_i=pop_indices)
+
+        if pca is None:
+            if n_components is None:
+                n_components = max(pcs)
+            pca = self.compute_PCA(pop_i=pop_indices, n_components=n_components)
+
+        values = None
+        if color_by is not None:
+            values = []
+            for idx, pop_sel in zip(pop_indices, pops_selected):
+                if color_by not in pop_sel.traits:
+                    raise ValueError(
+                        f"Trait '{color_by}' was not found in population {idx}."
+                    )
+                values.append(np.asarray(pop_sel.traits[color_by].y))
+            values = np.concatenate(values, axis=0)
+            if categorical is None and color_by == 'subpop':
+                categorical = True
+
+        return pop.plot_PCA(
+            pca,
+            pcs=pcs,
+            values=values,
+            categorical=categorical,
+            title=title,
+            color_label=color_by,
+            **kwargs,
+        )
+
     def print_attributes(self, attribute: str, only_active: bool = True):
         '''
         Prints the attributes of all populations in the superpopulation.
