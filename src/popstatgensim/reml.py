@@ -287,7 +287,9 @@ def _he_regression_core(
     residual_variance: float,
     X: np.ndarray | None = None,
     constrain: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pair_relatedness_threshold: float | None = None,
+    pair_filter_matrix: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """Fit the off-diagonal HE regression and map it onto variance components."""
     if X is not None:
         # HE regression is run on phenotypes residualized on the supplied covariates.
@@ -300,6 +302,33 @@ def _he_regression_core(
     # Build the pairwise regression problem over the upper triangle only.
     design = np.column_stack([V_i[iu] for V_i in Vs])
     response = y[iu[0]] * y[iu[1]]
+    n_pairs_total = int(response.shape[0])
+
+    if pair_relatedness_threshold is not None:
+        if pair_filter_matrix is None:
+            raise ValueError(
+                "`pair_filter_matrix` must be provided when `pair_relatedness_threshold` "
+                "is specified."
+            )
+        pair_filter_matrix = np.asarray(pair_filter_matrix, dtype=float)
+        if pair_filter_matrix.shape != (n, n):
+            raise ValueError(
+                f"`pair_filter_matrix` must have shape ({n}, {n})."
+            )
+        pair_mask = pair_filter_matrix[iu] <= pair_relatedness_threshold
+        if not np.any(pair_mask):
+            raise ValueError(
+                "Pair filtering removed every off-diagonal pair from HE regression."
+            )
+        design = design[pair_mask, :]
+        response = response[pair_mask]
+
+    n_pairs_used = int(response.shape[0])
+    if n_pairs_used <= design.shape[1]:
+        raise ValueError(
+            "Not enough pairwise observations remain to fit HE regression after pair "
+            "filtering."
+        )
 
     beta, _, _, _ = np.linalg.lstsq(design, response, rcond=None)
     if constrain:
@@ -316,7 +345,7 @@ def _he_regression_core(
     cov_theta = transform @ cov_beta @ transform.T
     if constrain:
         theta = np.maximum(theta, 0.0)
-    return theta, cov_theta, beta
+    return theta, cov_theta, beta, n_pairs_used, n_pairs_total
 
 
 def _he_warmstart(
@@ -326,7 +355,7 @@ def _he_warmstart(
     X: np.ndarray | None = None,
 ) -> np.ndarray:
     """Generic HE-based warm start used when a fast dense-GRM shortcut is unavailable."""
-    theta, _, _ = _he_regression_core(
+    theta, _, _, _, _ = _he_regression_core(
         y=y,
         Vs=Vs,
         residual_variance=residual_variance,
@@ -1101,6 +1130,8 @@ def run_HEreg(
     X: np.ndarray | None = None,
     constrain: bool = False,
     std_y: bool = False,
+    pair_relatedness_threshold: float | None = None,
+    pair_filter_matrix: np.ndarray | None = None,
     verbose: int = 1,
 ) -> dict:
     """
@@ -1131,6 +1162,15 @@ def run_HEreg(
         If True, negative component estimates are clipped to zero.
     std_y : bool, default False
         If True, standardize the phenotype to variance 1 after mean-centering.
+    pair_relatedness_threshold : float, optional
+        If provided, HE regression excludes pairwise observations whose relatedness in
+        `pair_filter_matrix` exceeds this threshold. By default, when a threshold is
+        supplied and `pair_filter_matrix` is omitted, the first fitted covariance
+        matrix is used, which for the usual one-component model is the SNP GRM.
+    pair_filter_matrix : ndarray, shape (N, N), optional
+        Matrix used to decide which pairs are excluded when
+        `pair_relatedness_threshold` is set. This can be a SNP GRM, true-IBD
+        relatedness matrix, or any other N x N pairwise relatedness measure.
     verbose : int, default 1
         If greater than 0, print a completion message.
     Returns
@@ -1151,12 +1191,17 @@ def run_HEreg(
         y=prepared.y,
         X_model=prepared.X_model,
     )
-    theta, vcov, _ = _he_regression_core(
+    if pair_relatedness_threshold is not None and pair_filter_matrix is None:
+        pair_filter_matrix = prepared.Vs[0]
+
+    theta, vcov, _, n_pairs_used, n_pairs_total = _he_regression_core(
         y=prepared.y,
         Vs=prepared.Vs,
         residual_variance=residual_variance,
         X=prepared.X_model,
         constrain=constrain,
+        pair_relatedness_threshold=pair_relatedness_threshold,
+        pair_filter_matrix=pair_filter_matrix,
     )
 
     out = _finalise_output(
@@ -1181,6 +1226,9 @@ def run_HEreg(
     # HE does not estimate the residual component through likelihood; we report
     # it on the post-fixed-effect variance scale instead.
     out["var_comps"]["est"][-1] = residual_variance - np.sum(out["var_comps"]["est"][:-1])
+    out["algorithm"]["n_pairs_total"] = n_pairs_total
+    out["algorithm"]["n_pairs_used"] = n_pairs_used
+    out["algorithm"]["pair_relatedness_threshold"] = pair_relatedness_threshold
     return out
 
 
