@@ -35,30 +35,63 @@ class _PreparedInputs:
     y: np.ndarray
     X_user: np.ndarray | None
     X_model: np.ndarray | None
+    Rs: list[np.ndarray]
+    Zs: list[np.ndarray | None]
     Vs: list[np.ndarray]
     phenotype_variance: float
     n_random: int
 
 
-def _as_matrix_list(Bs: Sequence[np.ndarray] | np.ndarray, name: str) -> list[np.ndarray]:
-    """Normalize a single covariance matrix or a sequence into a Python list."""
-    if isinstance(Bs, np.ndarray):
-        if Bs.ndim != 2:
+def _as_optional_matrix_list(
+    matrices: Sequence[np.ndarray | None] | np.ndarray | None,
+    name: str,
+) -> list[np.ndarray | None] | None:
+    """Normalize a single matrix or a sequence into a Python list, preserving None entries."""
+    if matrices is None:
+        return None
+    if isinstance(matrices, np.ndarray):
+        if matrices.ndim != 2:
             raise ValueError(f"`{name}` must be a 2D array or a list of 2D arrays.")
-        return [Bs]
-    matrices = [np.asarray(B, dtype=float) for B in Bs]
-    if len(matrices) == 0:
+        return [np.asarray(matrices, dtype=float)]
+
+    matrices_list = list(matrices)
+    if len(matrices_list) == 0:
         raise ValueError(f"`{name}` must contain at least one covariance matrix.")
-    for i, B in enumerate(matrices):
-        if B.ndim != 2:
+    out = []
+    for i, M in enumerate(matrices_list):
+        if M is None:
+            out.append(None)
+            continue
+        M = np.asarray(M, dtype=float)
+        if M.ndim != 2:
             raise ValueError(f"`{name}[{i}]` must be a 2D array.")
-    return matrices
+        out.append(M)
+    return out
+
+
+def _resolve_random_effect_inputs(
+    Rs: Sequence[np.ndarray | None] | np.ndarray | None = None,
+    Zs: Sequence[np.ndarray | None] | np.ndarray | None = None,
+) -> tuple[list[np.ndarray | None], list[np.ndarray | None]]:
+    """Resolve random-effect covariance/design inputs."""
+    Rs_list = _as_optional_matrix_list(Rs, "Rs")
+    Zs_list = _as_optional_matrix_list(Zs, "Zs")
+
+    if Rs_list is None and Zs_list is None:
+        raise ValueError("Must provide at least one of `Rs` or `Zs`.")
+    if Rs_list is None:
+        Rs_list = [None] * len(Zs_list)
+    if Zs_list is None:
+        Zs_list = [None] * len(Rs_list)
+    if len(Rs_list) != len(Zs_list):
+        raise ValueError("`Zs` must have the same length as `Rs`.")
+    return Rs_list, Zs_list
 
 
 def _prepare_inputs(
     y: np.ndarray,
-    Bs: Sequence[np.ndarray] | np.ndarray,
-    Zs: Sequence[np.ndarray | None] | None = None,
+    Rs: Sequence[np.ndarray | None] | np.ndarray | None = None,
+    Zs: Sequence[np.ndarray | None] | np.ndarray | None = None,
     X: np.ndarray | None = None,
     std_y: bool = False,
 ) -> _PreparedInputs:
@@ -70,13 +103,7 @@ def _prepare_inputs(
         raise ValueError("`y` contains non-finite values.")
 
     n = y.shape[0]
-    Bs_list = _as_matrix_list(Bs, "Bs")
-    if Zs is None:
-        Zs_list = [None] * len(Bs_list)
-    else:
-        Zs_list = list(Zs)
-        if len(Zs_list) != len(Bs_list):
-            raise ValueError("`Zs` must have the same length as `Bs`.")
+    Rs_list, Zs_list = _resolve_random_effect_inputs(Rs=Rs, Zs=Zs)
 
     if X is not None:
         X = np.asarray(X, dtype=float)
@@ -95,27 +122,39 @@ def _prepare_inputs(
     if phenotype_variance <= 0:
         raise ValueError("`y` must have non-zero variance after preprocessing.")
 
-    # Convert each random effect from (Z, B) form into its N x N covariance.
+    # Convert each random effect from (Z, R) form into its N x N covariance.
     Vs = []
-    for i, (B, Z) in enumerate(zip(Bs_list, Zs_list)):
+    Rs_resolved = []
+    for i, (R, Z) in enumerate(zip(Rs_list, Zs_list)):
         if Z is None:
-            if B.shape != (n, n):
+            if R is None:
                 raise ValueError(
-                    f"`Bs[{i}]` must have shape ({n}, {n}) when `Zs[{i}]` is None."
+                    f"`Rs[{i}]` must be provided when `Zs[{i}]` is None."
                 )
-            V_i = np.asarray(B, dtype=float)
+            if R.shape != (n, n):
+                raise ValueError(
+                    f"`Rs[{i}]` must have shape ({n}, {n}) when `Zs[{i}]` is None."
+                )
+            R_i = np.asarray(R, dtype=float)
+            V_i = R_i
         else:
             Z = np.asarray(Z, dtype=float)
             if Z.ndim != 2 or Z.shape[0] != n:
                 raise ValueError(f"`Zs[{i}]` must have shape ({n}, q_i).")
-            if B.shape != (Z.shape[1], Z.shape[1]):
+            if R is None:
+                R_i = np.eye(Z.shape[1], dtype=float)
+            else:
+                R_i = np.asarray(R, dtype=float)
+            if R_i.shape != (Z.shape[1], Z.shape[1]):
                 raise ValueError(
-                    f"`Bs[{i}]` must have shape ({Z.shape[1]}, {Z.shape[1]}) "
+                    f"`Rs[{i}]` must have shape ({Z.shape[1]}, {Z.shape[1]}) "
                     f"to match `Zs[{i}]`."
                 )
-            V_i = Z @ B @ Z.T
+            V_i = Z @ R_i @ Z.T
         if not np.isfinite(V_i).all():
             raise ValueError(f"The covariance matrix for component {i + 1} is non-finite.")
+        Rs_resolved.append(R_i)
+        Zs_list[i] = Z
         Vs.append(0.5 * (V_i + V_i.T))
 
     # Match greml_stochastic(): when covariates are provided, include an intercept
@@ -128,6 +167,8 @@ def _prepare_inputs(
         y=y,
         X_user=X,
         X_model=X_model,
+        Rs=Rs_resolved,
+        Zs=Zs_list,
         Vs=Vs,
         phenotype_variance=phenotype_variance,
         n_random=len(Vs),
@@ -331,20 +372,19 @@ def _fast_grm_he_warmstart(
 
 
 def _can_use_fast_grm_warmstart(
-    Bs: Sequence[np.ndarray] | np.ndarray,
-    Zs: Sequence[np.ndarray | None] | None,
+    Rs: Sequence[np.ndarray],
+    Zs: Sequence[np.ndarray | None],
     Vs: list[np.ndarray],
 ) -> bool:
     """Return True when the user supplied plain N x N covariance matrices."""
-    if Zs is not None and any(Z is not None for Z in Zs):
+    if any(Z is not None for Z in Zs):
         return False
-    Bs_list = _as_matrix_list(Bs, "Bs")
-    if len(Bs_list) != len(Vs):
+    if len(Rs) != len(Vs):
         return False
-    for B, V in zip(Bs_list, Vs):
-        if B.shape != V.shape:
+    for R, V in zip(Rs, Vs):
+        if R.shape != V.shape:
             return False
-        if np.asarray(B).shape[0] != np.asarray(B).shape[1]:
+        if np.asarray(R).shape[0] != np.asarray(R).shape[1]:
             return False
     return True
 
@@ -1056,8 +1096,8 @@ def _run_reml_quad_exact(
 
 def run_HEreg(
     y: np.ndarray,
-    Bs: Sequence[np.ndarray] | np.ndarray,
-    Zs: Sequence[np.ndarray | None] | None = None,
+    Rs: Sequence[np.ndarray | None] | np.ndarray | None = None,
+    Zs: Sequence[np.ndarray | None] | np.ndarray | None = None,
     X: np.ndarray | None = None,
     constrain: bool = False,
     std_y: bool = False,
@@ -1071,16 +1111,17 @@ def run_HEreg(
     y : ndarray, shape (N,)
         Outcome vector. The vector is always mean-centered. If ``std_y=True``,
         it is also scaled to variance 1 before fitting.
-    Bs : ndarray or list of ndarray
-        Random-effect covariance matrices. If a single matrix is supplied, it
-        is treated as a one-component model. If a list is supplied, each
-        element is one random-effect covariance matrix.
-    Zs : list of ndarray or None, optional
-        Random-effect design matrices. ``Zs[i]`` must have shape ``(N, q_i)``
-        and ``Bs[i]`` must then have shape ``(q_i, q_i)``. If ``Zs[i]`` is
-        ``None``, the corresponding ``Bs[i]`` is treated as already being an
-        ``N x N`` covariance matrix. If ``Zs`` itself is ``None``, all random
-        effects are assumed to be supplied directly as ``N x N`` matrices.
+    Rs : ndarray, list of ndarray, or list containing ``None``, optional
+        Random-effect cluster correlation/covariance matrices. If a single
+        matrix is supplied, it is treated as a one-component model. If
+        ``Zs[i]`` is ``None`` or ``Zs`` itself is ``None``, then ``Rs[i]``
+        must be an ``N x N`` covariance matrix. If ``Zs[i]`` is provided and
+        ``Rs[i]`` is ``None``, ``Rs[i]`` defaults to the identity matrix of
+        size ``Zs[i].shape[1]``.
+    Zs : ndarray, list of ndarray, or list containing ``None``, optional
+        Random-effect design matrices. ``Zs[i]`` must have shape ``(N, q_i)``.
+        When both ``Zs[i]`` and ``Rs[i]`` are provided, ``Rs[i]`` must have
+        shape ``(q_i, q_i)``.
     X : ndarray, shape (N, p), optional
         Fixed-effect covariate matrix, not including an intercept column. If
         provided, an intercept is automatically added internally and the
@@ -1092,7 +1133,6 @@ def run_HEreg(
         If True, standardize the phenotype to variance 1 after mean-centering.
     verbose : int, default 1
         If greater than 0, print a completion message.
-
     Returns
     -------
     dict
@@ -1106,7 +1146,7 @@ def run_HEreg(
         by the user-supplied covariates. For HE regression, ``log_likelihood``
         is returned as ``None`` and ``algorithm['iterations']`` is always 1.
     """
-    prepared = _prepare_inputs(y=y, Bs=Bs, Zs=Zs, X=X, std_y=std_y)
+    prepared = _prepare_inputs(y=y, Rs=Rs, Zs=Zs, X=X, std_y=std_y)
     beta_full, beta_se_full, beta_vcov_full, residual_variance = _compute_fe_ols_summary(
         y=prepared.y,
         X_model=prepared.X_model,
@@ -1146,8 +1186,8 @@ def run_HEreg(
 
 def run_REML(
     y: np.ndarray,
-    Bs: Sequence[np.ndarray] | np.ndarray,
-    Zs: Sequence[np.ndarray | None] | None = None,
+    Rs: Sequence[np.ndarray | None] | np.ndarray | None = None,
+    Zs: Sequence[np.ndarray | None] | np.ndarray | None = None,
     X: np.ndarray | None = None,
     init: list[float] | np.ndarray | None = None,
     method: str = "AI_stochastic",
@@ -1169,16 +1209,17 @@ def run_REML(
     y : ndarray, shape (N,)
         Outcome vector. It is always mean-centered. If ``std_y=True``, it is
         additionally standardized to variance 1 before fitting.
-    Bs : ndarray or list of ndarray
-        Random-effect covariance matrices. If a single matrix is supplied, it
-        is treated as a one-component model. If a list is supplied, each
-        element defines one random-effect covariance matrix.
-    Zs : list of ndarray or None, optional
-        Random-effect design matrices. ``Zs[i]`` must have shape ``(N, q_i)``
-        and ``Bs[i]`` must then have shape ``(q_i, q_i)``. If ``Zs[i]`` is
-        ``None``, the corresponding ``Bs[i]`` is treated as already being an
-        ``N x N`` covariance matrix. If ``Zs`` itself is ``None``, all random
-        effects are assumed to be supplied directly as ``N x N`` matrices.
+    Rs : ndarray, list of ndarray, or list containing ``None``, optional
+        Random-effect cluster correlation/covariance matrices. If a single
+        matrix is supplied, it is treated as a one-component model. If
+        ``Zs[i]`` is ``None`` or ``Zs`` itself is ``None``, then ``Rs[i]``
+        must be an ``N x N`` covariance matrix. If ``Zs[i]`` is provided and
+        ``Rs[i]`` is ``None``, ``Rs[i]`` defaults to the identity matrix of
+        size ``Zs[i].shape[1]``.
+    Zs : ndarray, list of ndarray, or list containing ``None``, optional
+        Random-effect design matrices. ``Zs[i]`` must have shape ``(N, q_i)``.
+        When both ``Zs[i]`` and ``Rs[i]`` are provided, ``Rs[i]`` must have
+        shape ``(q_i, q_i)``.
     X : ndarray, shape (N, p), optional
         Fixed-effect covariate matrix, not including an intercept column. If
         provided, REML automatically fits the fixed-effect design ``[1 | X]``
@@ -1217,7 +1258,6 @@ def run_REML(
         region and allow automatic fallback to stabler methods when the
         requested optimizer fails or does not converge. If False, use the
         older faster-but-riskier update path without those safeguards.
-
     Returns
     -------
     dict
@@ -1237,26 +1277,27 @@ def run_REML(
         raise ValueError("`n_probes` must be at least 1.")
 
     # Validate inputs once and convert all random effects to a common covariance form.
-    prepared = _prepare_inputs(y=y, Bs=Bs, Zs=Zs, X=X, std_y=std_y)
+    prepared = _prepare_inputs(y=y, Rs=Rs, Zs=Zs, X=X, std_y=std_y)
     if init is None:
         y_init = prepared.y
         if prepared.X_model is not None:
             beta_init = np.linalg.pinv(prepared.X_model) @ prepared.y
             y_init = prepared.y - prepared.X_model @ beta_init
+        residual_variance_init = float(y_init.var())
         # Use the cheaper GREML warm start when the model is already in dense-GRM form.
-        if _can_use_fast_grm_warmstart(Bs=Bs, Zs=Zs, Vs=prepared.Vs):
+        if _can_use_fast_grm_warmstart(Rs=prepared.Rs, Zs=prepared.Zs, Vs=prepared.Vs):
             init_theta = _fast_grm_he_warmstart(
                 Vs=prepared.Vs,
                 y=y_init,
-                phenotype_variance=prepared.phenotype_variance,
+                phenotype_variance=residual_variance_init,
             )
         else:
-            # Fall back to the more general HE regression warm start for arbitrary Z B Z' inputs.
+            # Fall back to the more general HE regression warm start for arbitrary Z R Z' inputs.
             init_theta = _he_warmstart(
-                y=prepared.y,
+                y=y_init,
                 Vs=prepared.Vs,
-                phenotype_variance=prepared.phenotype_variance,
-                X=prepared.X_model,
+                residual_variance=residual_variance_init,
+                X=None,
             )
     else:
         init = np.asarray(init, dtype=float)
