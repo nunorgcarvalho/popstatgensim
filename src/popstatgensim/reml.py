@@ -1239,7 +1239,7 @@ def run_REML(
     X: np.ndarray | None = None,
     init: list[float] | np.ndarray | None = None,
     method: str = "AI_stochastic",
-    tol: float = 1e-5,
+    tol: float = 1e-4,
     max_iter: int = 30,
     constrain: bool = False,
     std_y: bool = False,
