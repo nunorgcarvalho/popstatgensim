@@ -2557,22 +2557,26 @@ class Trait:
 
         trait_new.y_ = {}
         total = None
-        for name, effect in trait_new.effects.items():
-            if isinstance(effect, NoiseEffect):
-                values = np.concatenate([trait.y_[name] for trait in traits])
+        trait_new.inputs['_trait_components'] = trait_new.y_
+        try:
+            for name, effect in trait_new.effects.items():
+                if isinstance(effect, NoiseEffect):
+                    values = np.concatenate([trait.y_[name] for trait in traits])
+                    trait_new.y_[name] = values
+                    if total is None:
+                        total = np.array(values, copy=True)
+                    else:
+                        total += values
+                    continue
+                effect.refresh_from_inputs(trait_new.inputs)
+                values = effect.generate_component(trait_new.inputs, pop=trait_new.pop)
                 trait_new.y_[name] = values
                 if total is None:
                     total = np.array(values, copy=True)
                 else:
                     total += values
-                continue
-            effect.refresh_from_inputs(trait_new.inputs)
-            values = effect.generate_component(trait_new.inputs, pop=trait_new.pop)
-            trait_new.y_[name] = values
-            if total is None:
-                total = np.array(values, copy=True)
-            else:
-                total += values
+        finally:
+            trait_new.inputs.pop('_trait_components', None)
 
         trait_new.y = np.zeros(int(trait_new.inputs['N']), dtype=float) if total is None else total
         trait_new._update_empirical_variances()
