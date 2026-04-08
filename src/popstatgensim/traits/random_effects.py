@@ -79,6 +79,34 @@ def build_design_matrix_from_groups(groups: np.ndarray, missing_value: int = -1,
         return (Z, labels)
     return Z
 
+def build_continuous_similarity_kernel(values: np.ndarray,
+                                       project_psd: bool = True,
+                                       eps_eig: float = 1e-12) -> np.ndarray:
+    '''
+    Builds a correlation-like similarity kernel from 1D continuous values by
+    linearly mapping pairwise distances to the interval [0, 1].
+    '''
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError('values must be a 1D array for a continuous similarity kernel.')
+    if values.shape[0] == 0:
+        return np.zeros((0, 0), dtype=float)
+    if not np.all(np.isfinite(values)):
+        raise ValueError('values must be finite for a continuous similarity kernel.')
+
+    distances = np.abs(values[:, None] - values[None, :])
+    max_distance = float(distances.max(initial=0.0))
+    if np.isclose(max_distance, 0.0):
+        kernel = np.ones((values.shape[0], values.shape[0]), dtype=float)
+    else:
+        kernel = 1.0 - (distances / max_distance)
+    kernel = 0.5 * (kernel + kernel.T)
+    np.fill_diagonal(kernel, 1.0)
+
+    if project_psd:
+        kernel = nearest_correlation_matrix(kernel, eps_eig=eps_eig)
+    return kernel
+
 def _standardize_correlation_matrix(C: np.ndarray, name: str,
                                     tol: float = 1e-8) -> np.ndarray:
     C = np.asarray(C, dtype=float)
@@ -107,6 +135,72 @@ def _center_and_scale_random_effect(values: np.ndarray, target_var: float,
     if np.isclose(current_var, 0.0):
         raise ValueError(f'Random effect {name} has zero variance and cannot be rescaled.')
     return values * np.sqrt(target_var / current_var)
+
+def get_centered_kernel_mean_variance(K: np.ndarray) -> float:
+    '''
+    Returns the expected empirical variance after centering a Gaussian random
+    effect with covariance matrix K.
+    '''
+    K = np.asarray(K, dtype=float)
+    if K.ndim != 2 or K.shape[0] != K.shape[1]:
+        raise ValueError('K must be a square 2D array.')
+    if K.shape[0] == 0:
+        return 0.0
+    N = K.shape[0]
+    trace_centered = float(np.trace(K) - np.sum(K) / N)
+    return trace_centered / N
+
+def get_centered_design_kernel_mean_variance(Z: np.ndarray, A: np.ndarray) -> float:
+    '''
+    Returns the expected empirical variance after centering a Gaussian random
+    effect with covariance K = Z A Z^T.
+    '''
+    Z = np.asarray(Z, dtype=float)
+    A = np.asarray(A, dtype=float)
+    if Z.ndim != 2:
+        raise ValueError('Z must be a 2D array.')
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError('A must be a square 2D array.')
+    if Z.shape[1] != A.shape[0]:
+        raise ValueError('Z and A have incompatible shapes.')
+    if Z.shape[0] == 0:
+        return 0.0
+
+    ZA = Z @ A
+    trace_K = float(np.sum(ZA * Z))
+    sum_K = float(np.sum(ZA.sum(axis=0) * Z.sum(axis=0)))
+    N = Z.shape[0]
+    return (trace_K - sum_K / N) / N
+
+def scale_random_effect(values: np.ndarray, target_var: float, name: str,
+                        force_var: bool = True,
+                        expected_var: float = None) -> np.ndarray:
+    '''
+    Centers and scales one realized random effect either to match the exact
+    empirical variance or only the target expectation implied by the kernel.
+    '''
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f'Random effect {name} must be a 1D array.')
+
+    centered = values - values.mean()
+    if np.isclose(target_var, 0.0):
+        return np.zeros_like(centered)
+
+    if force_var:
+        current_var = float(centered.var())
+        if np.isclose(current_var, 0.0):
+            raise ValueError(f'Random effect {name} has zero variance and cannot be rescaled.')
+        return centered * np.sqrt(target_var / current_var)
+
+    if expected_var is None:
+        raise ValueError('expected_var must be provided when force_var=False.')
+    expected_var = float(expected_var)
+    if np.isclose(expected_var, 0.0):
+        raise ValueError(
+            f'Random effect {name} has zero expected centered variance and cannot realize positive variance.'
+        )
+    return centered * np.sqrt(target_var / expected_var)
 
 def is_identity_matrix(M: np.ndarray, tol: float = 1e-8) -> bool:
     '''
@@ -339,7 +433,8 @@ def _calibrate_random_fixed_loading(u_fixed: np.ndarray, y_fixed: np.ndarray,
 def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: list[float],
                        C: np.ndarray = None, names: list[str] = None,
                        replace_random: list[np.ndarray] = None,
-                       debug: bool = False) -> dict:
+                       debug: bool = False,
+                       rng: np.random.Generator = None) -> dict:
     '''
     Generates one or more random effects with user-specified within-effect kernels
     and optional between-effect correlations.
@@ -368,7 +463,7 @@ def get_random_effects(Zs: list[np.ndarray], As: list[np.ndarray], variances: li
         replace_random=replace_random,
     )
     M = len(names)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng() if rng is None else rng
 
     fixed_idx = [i for i, values in enumerate(replace_random) if values is not None]
     random_idx = [i for i in range(M) if i not in fixed_idx]

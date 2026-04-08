@@ -394,7 +394,7 @@ Move to `traits/effects.py`:
 1. `Effect`
 2. `GeneticEffect`
 3. `FixedEffect`
-4. `CorrelatedRandomEffect`
+4. `RandomEffect`
 5. `NoiseEffect`
 
 Move to `traits/trait.py`:
@@ -450,7 +450,7 @@ The root package should likely expose a curated set of major public symbols such
 3. `Trait`
 4. `GeneticEffect`
 5. `FixedEffect`
-6. `CorrelatedRandomEffect`
+6. `RandomEffect`
 7. `NoiseEffect`
 8. `PCAResult`
 9. `run_REML`

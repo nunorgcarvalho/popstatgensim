@@ -284,35 +284,111 @@ class FixedEffect(Effect):
             raise ValueError(f'Cannot rescale zero-variance fixed effect {self.name}.')
         return values * np.sqrt(self.var / current_var)
 
-class CorrelatedRandomEffect(Effect):
+class RandomEffect(Effect):
     '''
-    Generates one random effect whose realized values are correlated with an
-    already-realized component or trait.
+    Generates one random effect from a user-defined kernel. The kernel can be
+    defined dynamically from another population trait or relation, or fixed
+    directly through design/correlation matrices.
     '''
+    VALID_SOURCE_KINDS = {'relation', 'trait', 'array'}
+    VALID_KERNEL_TYPES = {'categorical', 'continuous'}
+    required_inputs = ('N',)
 
-    def __init__(self, name: str, var: float, r: float,
-                 reference_component: str = None, reference_trait: str = None,
-                 cluster_source: Union[str, np.ndarray] = None,
-                 Z: np.ndarray = None, A: np.ndarray = None):
+    def __init__(self, name: str, var: float,
+                 force_var: bool = True,
+                 source: Union[str, np.ndarray] = None,
+                 source_kind: str = 'relation',
+                 type: str = 'categorical',
+                 seed: int = None,
+                 r: float = 0.0,
+                 reference_component: str = None,
+                 reference_trait: str = None,
+                 Z: np.ndarray = None,
+                 A: np.ndarray = None,
+                 K: np.ndarray = None):
         super().__init__(name)
         self.var = float(var)
+        self.force_var = bool(force_var)
+        self.seed = int(seed) if seed is not None else int(np.random.SeedSequence().generate_state(1)[0])
         self.r = float(r)
         self.reference_component = reference_component
         self.reference_trait = reference_trait
-        self.cluster_source = copy.deepcopy(cluster_source)
+        if source_kind not in self.VALID_SOURCE_KINDS:
+            raise ValueError(
+                f"source_kind must be one of {sorted(self.VALID_SOURCE_KINDS)} for random effect {name}."
+            )
+        if type not in self.VALID_KERNEL_TYPES:
+            raise ValueError(
+                f"type must be one of {sorted(self.VALID_KERNEL_TYPES)} for random effect {name}."
+            )
+
+        self.source = copy.deepcopy(source)
+        self.source_kind = source_kind
+        self.kernel_type = type
         self.Z = None if Z is None else np.asarray(Z, dtype=float).copy()
         self.A = None if A is None else np.asarray(A, dtype=float).copy()
-        self.required_inputs = ('N',)
+        self.K = None if K is None else np.asarray(K, dtype=float).copy()
 
         if self.var < 0:
-            raise ValueError(f'var must be non-negative for correlated random effect {name}.')
+            raise ValueError(f'var must be non-negative for random effect {name}.')
         if abs(self.r) > 1:
-            raise ValueError(f'r must be between -1 and 1 for correlated random effect {name}.')
-        if self.reference_trait is None and self.reference_component is None:
+            raise ValueError(f'r must be between -1 and 1 for random effect {name}.')
+
+        kernel_inputs = sum(
+            value is not None for value in (self.source, self.Z, self.K)
+        )
+        if self.Z is not None and self.K is not None:
             raise ValueError(
-                f'Correlated random effect {name} must reference either a component in the same trait '
-                'or a component/trait in another trait.'
+                f'Random effect {name} cannot combine a direct kernel matrix K with a design matrix Z.'
             )
+        if self.K is not None and self.A is not None:
+            raise ValueError(
+                f'Random effect {name} cannot combine a direct kernel matrix K with a separate A matrix.'
+            )
+        if kernel_inputs > 1:
+            raise ValueError(
+                f'Random effect {name} received multiple kernel definitions; choose only one.'
+            )
+        if self.kernel_type == 'continuous' and self.A is not None and self.source is not None:
+            raise ValueError(
+                f'Random effect {name} cannot combine type=\"continuous\" with a separate A matrix.'
+            )
+
+    @classmethod
+    def from_matrix(cls, name: str, var: float, K: np.ndarray,
+                    force_var: bool = True, seed: int = None,
+                    r: float = 0.0,
+                    reference_component: str = None,
+                    reference_trait: str = None) -> 'RandomEffect':
+        '''
+        Convenience constructor for a random effect with a fixed individual-level
+        relationship/correlation matrix.
+        '''
+        return cls(
+            name=name,
+            var=var,
+            force_var=force_var,
+            K=K,
+            seed=seed,
+            r=r,
+            reference_component=reference_component,
+            reference_trait=reference_trait,
+        )
+
+    def has_reference(self) -> bool:
+        return self.reference_trait is not None or self.reference_component is not None
+
+    def has_dynamic_definition(self) -> bool:
+        if self.source is None and self.Z is None and self.A is None and self.K is None:
+            return True
+        return isinstance(self.source, str) and self.source_kind in {'relation', 'trait'} and self.A is None
+
+    def should_drop_on_population_reshape(self) -> bool:
+        if self.has_dynamic_definition():
+            return False
+        if self.K is not None or self.Z is not None or self.A is not None:
+            return True
+        return self.source is not None and not isinstance(self.source, str)
 
     def _reference_label(self) -> str:
         if self.reference_trait is None:
@@ -326,20 +402,20 @@ class CorrelatedRandomEffect(Effect):
             trait_components = inputs.get('_trait_components')
             if trait_components is None or self.reference_component not in trait_components:
                 raise ValueError(
-                    f"Correlated random effect {self.name} requires component "
+                    f"Random effect {self.name} requires component "
                     f"'{self.reference_component}' to be generated earlier in the same trait."
                 )
             values = trait_components[self.reference_component]
         else:
             if pop is None:
                 raise ValueError(
-                    f"Correlated random effect {self.name} requires a Population object "
+                    f"Random effect {self.name} requires a Population object "
                     'when referencing another trait.'
                 )
             if self.reference_trait not in pop.traits:
                 raise ValueError(
                     f"Trait '{self.reference_trait}' was not found in the population for "
-                    f"correlated random effect {self.name}."
+                    f"random effect {self.name}."
                 )
             reference_trait = pop.traits[self.reference_trait]
             if self.reference_component is None:
@@ -348,57 +424,125 @@ class CorrelatedRandomEffect(Effect):
                 if self.reference_component not in reference_trait.y_:
                     raise ValueError(
                         f"Trait '{self.reference_trait}' does not contain component "
-                        f"'{self.reference_component}' for correlated random effect {self.name}."
+                        f"'{self.reference_component}' for random effect {self.name}."
                     )
                 values = reference_trait.y_[self.reference_component]
 
         values = np.asarray(values, dtype=float)
         if values.ndim != 1:
-            raise ValueError(f'Reference values for correlated random effect {self.name} must be 1D.')
+            raise ValueError(f'Reference values for random effect {self.name} must be 1D.')
+        return values
+
+    def _resolve_source_values(self, N: int, pop: Population = None) -> np.ndarray:
+        if self.source is None:
+            raise ValueError(f'Random effect {self.name} does not have a source to resolve.')
+
+        if isinstance(self.source, str):
+            if pop is None:
+                raise ValueError(
+                    f"Random effect {self.name} requires a Population object to resolve "
+                    f"{self.source_kind} source '{self.source}'."
+                )
+            if self.source_kind == 'relation':
+                if self.source not in pop.relations:
+                    raise ValueError(
+                        f"source='{self.source}' was not found in Population.relations "
+                        f"for random effect {self.name}."
+                    )
+                values = np.asarray(pop.relations[self.source])
+            elif self.source_kind == 'trait':
+                if self.source not in pop.traits:
+                    raise ValueError(
+                        f"source='{self.source}' was not found in Population.traits "
+                        f"for random effect {self.name}."
+                    )
+                values = np.asarray(pop.traits[self.source].y)
+            else:
+                raise ValueError(
+                    f"String sources require source_kind to be 'relation' or 'trait' for random effect {self.name}."
+                )
+        else:
+            values = np.asarray(self.source)
+
+        if values.ndim != 1 or values.shape[0] != N:
+            raise ValueError(
+                f'Source values for random effect {self.name} must resolve to a length-{N} 1D array.'
+            )
         return values
 
     def _resolve_kernel(self, N: int, pop: Population = None) -> tuple[np.ndarray, np.ndarray]:
+        if self.K is not None:
+            A = random_effects_utils._standardize_correlation_matrix(self.K, f'K for random effect {self.name}')
+            if A.shape[0] != N:
+                raise ValueError(f'K for random effect {self.name} must have shape ({N}, {N}).')
+            return (None, A)
+
         if self.Z is not None:
             Z = np.asarray(self.Z, dtype=float)
             if Z.ndim != 2:
-                raise ValueError(f'Z must be a 2D array for correlated random effect {self.name}.')
+                raise ValueError(f'Z must be a 2D array for random effect {self.name}.')
             if Z.shape[0] != N:
-                raise ValueError(
-                    f'Z for correlated random effect {self.name} must have {N} rows.'
-                )
+                raise ValueError(f'Z for random effect {self.name} must have {N} rows.')
             A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            A = random_effects_utils._standardize_correlation_matrix(A, f'A for random effect {self.name}')
             return (Z, A)
 
-        if self.cluster_source is None:
+        if self.source is None:
             A = np.eye(N, dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            A = random_effects_utils._standardize_correlation_matrix(A, f'A for random effect {self.name}')
             return (None, A)
 
-        if isinstance(self.cluster_source, str):
-            if pop is None:
-                raise ValueError(
-                    f"Correlated random effect {self.name} requires a Population object "
-                    f"to resolve cluster_source='{self.cluster_source}'."
-                )
-            if self.cluster_source not in pop.relations:
-                raise ValueError(
-                    f"cluster_source='{self.cluster_source}' was not found in Population.relations "
-                    f"for correlated random effect {self.name}."
-                )
-            groups = np.asarray(pop.relations[self.cluster_source])
+        values = self._resolve_source_values(N=N, pop=pop)
+        if self.kernel_type == 'categorical':
+            Z = random_effects_utils.build_design_matrix_from_groups(values)
+            A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            A = random_effects_utils._standardize_correlation_matrix(A, f'A for random effect {self.name}')
         else:
-            groups = np.asarray(self.cluster_source)
-
-        if groups.ndim != 1 or groups.shape[0] != N:
-            raise ValueError(
-                f'cluster_source for correlated random effect {self.name} must resolve to a length-{N} 1D array.'
-            )
-
-        Z = random_effects_utils.build_design_matrix_from_groups(groups)
-        A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
+            if not np.issubdtype(np.asarray(values).dtype, np.number):
+                raise ValueError(
+                    f"Continuous random effect {self.name} requires numeric source values."
+                )
+            A = random_effects_utils.build_continuous_similarity_kernel(values)
+            Z = None
         return (Z, A)
 
+    def _make_rng(self) -> np.random.Generator:
+        return np.random.default_rng(self.seed)
+
+    def _compute_expected_centered_variance(self, Z: np.ndarray,
+                                            A: np.ndarray) -> float:
+        if Z is None:
+            return random_effects_utils.get_centered_kernel_mean_variance(A)
+        return random_effects_utils.get_centered_design_kernel_mean_variance(Z, A)
+
+    def _sample_uncorrelated_component(self, Z: np.ndarray, A: np.ndarray,
+                                       rng: np.random.Generator) -> np.ndarray:
+        if Z is None:
+            if A.shape[0] == 0:
+                values = np.zeros(0, dtype=float)
+            else:
+                S = random_effects_utils.psd_sqrt(A, clip=0.0)
+                values = S @ rng.standard_normal(A.shape[0])
+        else:
+            if A.shape[0] == 0:
+                values = np.zeros(Z.shape[0], dtype=float)
+            else:
+                L = np.linalg.cholesky(0.5 * (A + A.T) + 1e-12 * np.eye(A.shape[0]))
+                cluster_scores = L @ rng.standard_normal(A.shape[0])
+                values = Z @ cluster_scores
+
+        expected_var = self._compute_expected_centered_variance(Z=Z, A=A)
+        return random_effects_utils.scale_random_effect(
+            values,
+            target_var=self.var,
+            name=self.name,
+            force_var=self.force_var,
+            expected_var=expected_var,
+        )
+
     def _generate_component_identity_cluster_fast(self, reference_values: np.ndarray,
-                                                  Z: np.ndarray, A: np.ndarray) -> Optional[np.ndarray]:
+                                                  Z: np.ndarray, A: np.ndarray,
+                                                  rng: np.random.Generator) -> Optional[np.ndarray]:
         '''
         Fast path for identity cluster relationship matrices, which avoids dense
         N x N kernel eigendecompositions.
@@ -412,6 +556,23 @@ class CorrelatedRandomEffect(Effect):
             assignments = random_effects_utils.get_group_assignments_from_design(Z)
             if assignments is None:
                 return None
+
+        if not self.has_reference():
+            valid = assignments >= 0
+            if np.any(valid):
+                cluster_scores = rng.standard_normal(np.max(assignments[valid]) + 1)
+                raw_values = np.zeros(reference_values.shape[0], dtype=float)
+                raw_values[valid] = cluster_scores[assignments[valid]]
+            else:
+                raw_values = np.zeros(reference_values.shape[0], dtype=float)
+            expected_var = self._compute_expected_centered_variance(Z=Z, A=A)
+            return random_effects_utils.scale_random_effect(
+                raw_values,
+                target_var=self.var,
+                name=self.name,
+                force_var=self.force_var,
+                expected_var=expected_var,
+            )
 
         reference_values = np.asarray(reference_values, dtype=float)
         u_fixed = reference_values - reference_values.mean()
@@ -436,40 +597,53 @@ class CorrelatedRandomEffect(Effect):
             random_name=self.name,
         )
 
-        latent_noise = np.random.normal(size=reference_values.shape[0])
+        latent_noise = rng.standard_normal(reference_values.shape[0])
         latent_values = rho * y_fixed + np.sqrt(max(1.0 - rho * rho, 0.0)) * latent_noise
         raw_values = random_effects_utils.apply_identity_cluster_kernel_sqrt(assignments, latent_values)
-        return random_effects_utils._center_and_scale_random_effect(raw_values, self.var, self.name)
+        return random_effects_utils.scale_random_effect(
+            raw_values,
+            target_var=self.var,
+            name=self.name,
+            force_var=True,
+            expected_var=trace_random,
+        )
 
     def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
-        Generates a random effect correlated with one previously realized reference.
+        Generates one random effect from the current kernel definition.
         '''
         if 'N' not in inputs:
             raise ValueError(f"Missing required input 'N' for effect {self.name}.")
         N = int(inputs['N'])
-
-        reference_values = self._resolve_reference_values(inputs, pop=pop)
-        if reference_values.shape[0] != N:
-            raise ValueError(
-                f'Reference values for correlated random effect {self.name} have incompatible length.'
-            )
+        rng = self._make_rng()
 
         Z, A = self._resolve_kernel(N=N, pop=pop)
 
+        reference_values = None
+        if self.has_reference():
+            reference_values = self._resolve_reference_values(inputs, pop=pop)
+            if reference_values.shape[0] != N:
+                raise ValueError(
+                    f'Reference values for random effect {self.name} have incompatible length.'
+                )
+
         fast_values = self._generate_component_identity_cluster_fast(
-            reference_values=reference_values,
+            reference_values=np.zeros(N, dtype=float) if reference_values is None else reference_values,
             Z=Z,
             A=A,
+            rng=rng,
         )
         if fast_values is not None:
             return fast_values
+
+        if not self.has_reference():
+            return self._sample_uncorrelated_component(Z=Z, A=A, rng=rng)
 
         reference_var = float(reference_values.var())
         if np.isclose(reference_var, 0.0):
             if not np.isclose(self.r, 0.0):
                 raise ValueError(
-                    f'Correlated random effect {self.name} cannot target non-zero correlation with '
+                    f'Random effect {self.name} cannot target non-zero correlation with '
                     f'zero-variance reference {self._reference_label()}.'
                 )
             random_effects = random_effects_utils.get_random_effects(
@@ -477,6 +651,7 @@ class CorrelatedRandomEffect(Effect):
                 As=[A],
                 variances=[self.var],
                 names=[self.name],
+                rng=rng,
             )
             return random_effects['values'][self.name]
 
@@ -488,6 +663,7 @@ class CorrelatedRandomEffect(Effect):
             C=np.array([[1.0, self.r], [self.r, 1.0]], dtype=float),
             names=[reference_name, self.name],
             replace_random=[reference_values, None],
+            rng=rng,
         )
         return random_effects['values'][self.name]
 

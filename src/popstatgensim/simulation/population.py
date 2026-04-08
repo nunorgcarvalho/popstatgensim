@@ -516,8 +516,12 @@ class Population:
 
         new_pop.traits = {}
         for name, trait in self.traits.items():
-            trait_new = trait.index_trait(i_keep, self.G, G_already_indexed=False)
-            trait_new.pop = new_pop
+            trait_new = trait.index_trait(
+                i_keep,
+                self.G,
+                G_already_indexed=False,
+                pop=new_pop,
+            )
             trait_new.name = name
             new_pop.traits[name] = trait_new
 
@@ -639,10 +643,6 @@ class Population:
             name (str): Name of trait.
             **kwargs: All other arguments are passed to the Trait constructor. See Trait.__init__ for details.
         '''
-        if 'Gpar' in kwargs:
-            kwargs['inputs'] = kwargs.get('inputs', {})
-            kwargs['inputs']['G_par'] = kwargs.pop('Gpar')
-
         inputs = copy.deepcopy(kwargs.pop('inputs', {}))
         effects = kwargs.get('effects')
         if effects is None:
@@ -657,54 +657,6 @@ class Population:
 
         trait = Trait(inputs=inputs, pop=self, name=name, **kwargs)
         self.traits[name] = trait
-    
-    def add_trait_from_effects(self, name: str, **kwargs):
-        '''
-        Backward-compatible wrapper that builds GeneticEffect objects from raw effect arrays.
-        Parameters:
-            name (str): Name of trait.
-            **kwargs: Effect arrays and Trait inputs.
-        '''
-        if 'Gpar' in kwargs:
-            kwargs['G_par'] = kwargs.pop('Gpar')
-
-        effects_raw = kwargs.pop('effects')
-        is_standardized = not kwargs.pop('per_allele', False)
-        var_Eps = kwargs.pop('var_Eps', None)
-        force_var = kwargs.pop('force_var', False)
-        inputs = copy.deepcopy(kwargs.pop('inputs', {}))
-
-        if isinstance(effects_raw, dict):
-            effects_dict = effects_raw
-        else:
-            effects_dict = {'A': effects_raw}
-
-        effect_objects = {}
-        for effect_name, effect_values in effects_dict.items():
-            effect_values = np.asarray(effect_values, dtype=float)
-            G_std = kwargs.pop('G_std', None) if effect_name == 'A' else kwargs.pop('G_par_std', None)
-            if G_std is None:
-                if effect_name == 'A' and 'G' in kwargs:
-                    G_std = trait_sampling.get_G_std_for_effects(np.asarray(kwargs['G']))
-                elif effect_name == 'A_par' and 'G_par' in kwargs:
-                    G_std = trait_sampling.get_G_std_for_effects(np.asarray(kwargs['G_par']))
-            effect_objects[effect_name] = GeneticEffect.from_effects(
-                effects=effect_values,
-                is_standardized=is_standardized,
-                G_std=G_std,
-                name=effect_name,
-                force_var=force_var,
-            )
-
-        if 'G' in kwargs:
-            inputs['G'] = kwargs.pop('G')
-        if 'G_par' in kwargs:
-            inputs['G_par'] = kwargs.pop('G_par')
-
-        if kwargs:
-            raise ValueError(f'Unexpected keyword arguments: {sorted(kwargs)}')
-
-        self.add_trait(name=name, effects=effect_objects, inputs=inputs, var_Eps=var_Eps)
     
     def add_trait_from_fixed_values(self, name: str, y: np.ndarray,
                                     trait_type: str = 'fixed'):
@@ -743,6 +695,16 @@ class Population:
                 trait.generate_trait()
             elif key == 'sex':
                 self.assign_sex()
+
+    def _drop_nondynamic_random_effects(self, reason: str):
+        '''
+        Removes trait random effects that were defined from fixed matrices or
+        arrays and therefore cannot safely follow a changed population state.
+        '''
+        for trait in self.traits.values():
+            if trait.type != 'composite':
+                continue
+            trait._drop_random_effects_for_population_reshape(reason=reason)
 
     def assign_sex(self):
         '''
@@ -931,6 +893,7 @@ class Population:
                 relations = None
             # updates objects and past
             self._update_obj(H=H, update_past=True, relations=relations, Haplos=Haplos, update_pedigree=self.track_pedigree)
+            self._drop_nondynamic_random_effects(reason='simulating a new generation')
             # records metrics
             self._update_temp_metrics(t, generation=self.t, G=self.G)
             if trait_updates:

@@ -5,7 +5,7 @@ from .estimation import run_HEreg, run_REML
 from .genome import PCAResult
 from .io import export_GRM_GCTA, export_trait
 from .simulation import Population, SuperPopulation
-from .traits import CorrelatedRandomEffect, FixedEffect, GeneticEffect, NoiseEffect, Trait
+from .traits import FixedEffect, GeneticEffect, NoiseEffect, RandomEffect, Trait
 
 __all__ = [
     "Population",
@@ -13,7 +13,7 @@ __all__ = [
     "Trait",
     "GeneticEffect",
     "FixedEffect",
-    "CorrelatedRandomEffect",
+    "RandomEffect",
     "NoiseEffect",
     "PCAResult",
     "run_HEreg",

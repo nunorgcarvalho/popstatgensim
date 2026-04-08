@@ -10,6 +10,7 @@ def test_root_public_api_exposes_main_symbols():
     assert psg.SuperPopulation.__name__ == "SuperPopulation"
     assert psg.Trait.__name__ == "Trait"
     assert psg.GeneticEffect.__name__ == "GeneticEffect"
+    assert psg.RandomEffect.__name__ == "RandomEffect"
     assert callable(psg.run_HEreg)
     assert callable(psg.run_REML)
     assert not hasattr(psg, "run_HE_regression")

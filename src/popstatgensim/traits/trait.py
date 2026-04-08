@@ -9,7 +9,7 @@ from typing import Union
 import numpy as np
 
 from . import effect_sampling as sampling
-from .effects import CorrelatedRandomEffect, Effect, FixedEffect, GeneticEffect, NoiseEffect
+from .effects import Effect, FixedEffect, GeneticEffect, NoiseEffect, RandomEffect
 
 
 class Trait:
@@ -144,6 +144,8 @@ class Trait:
         for name, effect in self.effects.items():
             if isinstance(effect, GeneticEffect) and effect.var_indep is not None:
                 self.var_initial[name] = effect.var_indep
+            elif isinstance(effect, RandomEffect):
+                self.var_initial[name] = effect.var
             elif isinstance(effect, NoiseEffect):
                 self.var_initial[name] = effect.var
             elif name in self.var:
@@ -176,10 +178,10 @@ class Trait:
             elif name == 'Eps':
                 if not isinstance(effect, NoiseEffect):
                     raise ValueError('effects[Eps] must be a NoiseEffect object.')
-            elif not isinstance(effect, (FixedEffect, CorrelatedRandomEffect)):
+            elif not isinstance(effect, (FixedEffect, RandomEffect)):
                 raise ValueError(
                     f'effects[{name}] must be a GeneticEffect, FixedEffect, '
-                    'CorrelatedRandomEffect, or NoiseEffect object.'
+                    'RandomEffect, or NoiseEffect object.'
                 )
 
             for input_name in effect.required_inputs:
@@ -199,55 +201,85 @@ class Trait:
                             f"must depend on an earlier trait; got '{effect.input_name}'."
                         )
 
-            if isinstance(effect, CorrelatedRandomEffect):
-                if isinstance(effect.cluster_source, str) and self.pop is None:
+            if isinstance(effect, RandomEffect):
+                if effect.has_dynamic_definition() and self.pop is None:
                     raise ValueError(
-                        f"Correlated random effect '{name}' requires a Population object "
-                        f"to resolve cluster_source='{effect.cluster_source}'."
+                        f"Random effect '{name}' requires a Population object "
+                        'to resolve its dynamic kernel definition.'
                     )
+
+                if isinstance(effect.source, str) and effect.source_kind == 'relation' and self.pop is not None:
+                    if effect.source not in self.pop.relations:
+                        raise ValueError(
+                            f"Random effect '{name}' references missing relation '{effect.source}'."
+                        )
+
+                if isinstance(effect.source, str) and effect.source_kind == 'trait':
+                    if self.pop is None:
+                        raise ValueError(
+                            f"Random effect '{name}' references another trait in its kernel and "
+                            'therefore requires a Population object.'
+                        )
+                    if effect.source not in self.pop.traits:
+                        raise ValueError(
+                            f"Random effect '{name}' references missing source trait '{effect.source}'."
+                        )
+                    if current_name is not None and effect.source == current_name:
+                        raise ValueError(
+                            f"Random effect '{name}' cannot use its own trait '{current_name}' as a kernel source."
+                        )
+                    if current_name in trait_names:
+                        if trait_names.index(effect.source) >= trait_names.index(current_name):
+                            raise ValueError(
+                                f"Random effect '{name}' in trait '{current_name}' "
+                                f"must use an earlier source trait; got '{effect.source}'."
+                            )
+
+                if not effect.has_reference():
+                    continue
 
                 if effect.reference_trait is None:
                     if effect.reference_component is None:
                         raise ValueError(
-                            f"Correlated random effect '{name}' must reference a component "
+                            f"Random effect '{name}' must reference a component "
                             'when no reference_trait is provided.'
                         )
                     if effect.reference_component not in effect_order:
                         raise ValueError(
-                            f"Correlated random effect '{name}' references unknown same-trait "
+                            f"Random effect '{name}' references unknown same-trait "
                             f"component '{effect.reference_component}'."
                         )
                     if effect_order.index(effect.reference_component) >= idx:
                         raise ValueError(
-                            f"Correlated random effect '{name}' must come after its referenced "
+                            f"Random effect '{name}' must come after its referenced "
                             f"same-trait component '{effect.reference_component}'."
                         )
                 else:
                     if current_name is not None and effect.reference_trait == current_name:
                         raise ValueError(
-                            f"Correlated random effect '{name}' should use reference_trait=None "
+                            f"Random effect '{name}' should use reference_trait=None "
                             'for same-trait component dependencies.'
                         )
                     if self.pop is None:
                         raise ValueError(
-                            f"Correlated random effect '{name}' references another trait and "
+                            f"Random effect '{name}' references another trait and "
                             'therefore requires a Population object.'
                         )
                     if effect.reference_trait not in self.pop.traits:
                         raise ValueError(
-                            f"Correlated random effect '{name}' references missing trait "
+                            f"Random effect '{name}' references missing trait "
                             f"'{effect.reference_trait}'."
                         )
                     reference_trait = self.pop.traits[effect.reference_trait]
                     if effect.reference_component is not None and effect.reference_component not in reference_trait.y_:
                         raise ValueError(
-                            f"Correlated random effect '{name}' references missing component "
+                            f"Random effect '{name}' references missing component "
                             f"'{effect.reference_component}' in trait '{effect.reference_trait}'."
                         )
                     if current_name in trait_names:
                         if trait_names.index(effect.reference_trait) >= trait_names.index(current_name):
                             raise ValueError(
-                                f"Correlated random effect '{name}' in trait '{current_name}' "
+                                f"Random effect '{name}' in trait '{current_name}' "
                                 f"must depend on an earlier trait; got '{effect.reference_trait}'."
                             )
 
@@ -277,8 +309,14 @@ class Trait:
 
         self._validate_effect_definitions()
 
+        component_names = list(self.y_.keys())
+        if 'Eps' in self.y_:
+            component_names = [name for name in component_names if name != 'Eps'] + ['Eps']
+            self.y_ = {name: self.y_[name] for name in component_names}
+
         component_sum = np.zeros(N, dtype=float)
-        for name, values in self.y_.items():
+        for name in component_names:
+            values = self.y_[name]
             values = np.asarray(values, dtype=float)
             if values.ndim != 1:
                 raise ValueError(f'Component {name} must be a 1D array.')
@@ -354,6 +392,180 @@ class Trait:
         self.type = 'composite'
         self._update_empirical_variances()
         self._update_initial_variances()
+
+    def _restore_state(self, state: dict):
+        self.pop = state['pop']
+        self.name = state['name']
+        self.y = state['y']
+        self.y_ = state['y_']
+        self.var = state['var']
+        self.var_initial = state['var_initial']
+        self.effects = state['effects']
+        self.inputs = state['inputs']
+        self.type = state['type']
+
+    def _snapshot_state(self) -> dict:
+        return {
+            'pop': self.pop,
+            'name': self.name,
+            'y': self.y.copy(),
+            'y_': {name: values.copy() for name, values in self.y_.items()},
+            'var': copy.deepcopy(self.var),
+            'var_initial': copy.deepcopy(self.var_initial),
+            'effects': copy.deepcopy(self.effects),
+            'inputs': copy.deepcopy(self.inputs),
+            'type': self.type,
+        }
+
+    def _recompute_total_from_components(self):
+        N = int(self.inputs['N'])
+        total = np.zeros(N, dtype=float)
+        for values in self.y_.values():
+            total += values
+        self.y = total
+        self._update_empirical_variances()
+        self._update_initial_variances()
+
+    def _same_trait_dependents(self, component_name: str) -> list[str]:
+        dependents = []
+        for name, effect in self.effects.items():
+            if not isinstance(effect, RandomEffect):
+                continue
+            if effect.reference_trait is None and effect.reference_component == component_name:
+                dependents.append(name)
+        return dependents
+
+    def _remove_effect_in_place(self, name: str):
+        self.effects.pop(name, None)
+        self.y_.pop(name, None)
+        self.var.pop(name, None)
+        self.var_initial.pop(name, None)
+        self._recompute_total_from_components()
+
+    def _drop_random_effects_for_population_reshape(self, reason: str,
+                                                    warn: bool = True) -> list[str]:
+        removed = []
+        pending = [
+            name for name, effect in self.effects.items()
+            if isinstance(effect, RandomEffect) and effect.should_drop_on_population_reshape()
+        ]
+        while pending:
+            name = pending.pop(0)
+            if name in removed or name not in self.effects:
+                continue
+            removed.append(name)
+            for dependent in self._same_trait_dependents(name):
+                if dependent not in removed and dependent not in pending:
+                    pending.append(dependent)
+
+        if removed and warn:
+            warnings.warn(
+                f"Trait '{self.name}' removed random effect(s) {removed} after {reason} because "
+                'their kernels were defined from fixed matrices or arrays and cannot update safely '
+                'to the new population state.',
+                stacklevel=2,
+            )
+
+        for name in removed:
+            self._remove_effect_in_place(name)
+        return removed
+
+    def _refresh_dynamic_random_effects(self) -> list[str]:
+        refreshed = []
+        self.inputs['_trait_components'] = self.y_
+        try:
+            for name, effect in self.effects.items():
+                if not isinstance(effect, RandomEffect):
+                    continue
+                if not effect.has_dynamic_definition():
+                    continue
+                effect.refresh_from_inputs(self.inputs)
+                self.y_[name] = effect.generate_component(self.inputs, pop=self.pop)
+                refreshed.append(name)
+        finally:
+            self.inputs.pop('_trait_components', None)
+
+        if refreshed:
+            self._recompute_total_from_components()
+        return refreshed
+
+    def add_effect(self, effect: Effect, inputs: dict = None,
+                   copy_inputs: bool = True, **kwargs):
+        '''
+        Adds one effect to an existing composite trait and updates the realized
+        trait values without regenerating unaffected components.
+        '''
+        if self.type in {'fixed', 'permanent'}:
+            raise ValueError(f"Cannot add effects to a {self.type} trait.")
+        if not isinstance(effect, Effect):
+            raise ValueError('effect must be an Effect object.')
+        if effect.name in self.effects:
+            raise ValueError(f"Trait already contains an effect named '{effect.name}'.")
+
+        state = self._snapshot_state()
+        try:
+            self.effects[effect.name] = copy.deepcopy(effect)
+            if inputs is not None or kwargs:
+                self.update_inputs(inputs=inputs, copy_inputs=copy_inputs, **kwargs)
+
+            self._validate_effect_definitions()
+            self.inputs['_trait_components'] = self.y_
+            try:
+                effect_obj = self.effects[effect.name]
+                effect_obj.refresh_from_inputs(self.inputs)
+                self.y_[effect.name] = effect_obj.generate_component(self.inputs, pop=self.pop)
+            finally:
+                self.inputs.pop('_trait_components', None)
+
+            self._recompute_total_from_components()
+            self.validate()
+        except Exception:
+            self._restore_state(state)
+            raise
+
+    def remove_effect(self, name: str):
+        '''
+        Removes one effect from an existing composite trait and updates the
+        realized trait values.
+        '''
+        if self.type in {'fixed', 'permanent'}:
+            raise ValueError(f"Cannot remove effects from a {self.type} trait.")
+        if name not in self.effects:
+            raise ValueError(f"Trait does not contain an effect named '{name}'.")
+
+        dependents = self._same_trait_dependents(name)
+        if dependents:
+            raise ValueError(
+                f"Cannot remove effect '{name}' because the following effect(s) depend on it: {dependents}."
+            )
+
+        self._remove_effect_in_place(name)
+        self.validate()
+
+    def add_popstrat(self, variance: float, force_var: bool = True,
+                     name: str = 'popstrat'):
+        '''
+        Convenience wrapper that adds a categorical subpopulation random effect
+        using the population's permanent `subpop` trait.
+        '''
+        if self.pop is None:
+            raise ValueError('add_popstrat requires the trait to belong to a Population.')
+        if 'subpop' not in self.pop.traits:
+            raise ValueError(
+                "Population is missing the 'subpop' trait. "
+                'Call SuperPopulation.add_subpop_trait() before add_popstrat().'
+            )
+
+        self.add_effect(
+            RandomEffect(
+                name=name,
+                var=variance,
+                force_var=force_var,
+                source='subpop',
+                source_kind='trait',
+                type='categorical',
+            )
+        )
 
     def set_force_var(self, force_var: bool,
                       names: Union[str, list[str]] = None,
@@ -567,6 +779,7 @@ class Trait:
         if 'A_par' in trait_new.effects and G_par is not None:
             trait_new.inputs['G_par'] = np.asarray(G_par)
         trait_new._refresh_derived_inputs()
+        trait_new._drop_random_effects_for_population_reshape(reason='joining populations')
 
         trait_new.y_ = {}
         total = None
@@ -597,13 +810,14 @@ class Trait:
         return trait_new
 
     def index_trait(self, i_keep: np.ndarray, G: np.ndarray = None,
-                    G_already_indexed: bool = False) -> 'Trait':
+                    G_already_indexed: bool = False,
+                    pop: Population = None) -> 'Trait':
         '''
         Returns a Trait object that contains only the specified individuals.
         '''
         trait_new = self.__class__.__new__(self.__class__)
         trait_new._initialize_empty()
-        trait_new.pop = self.pop
+        trait_new.pop = self.pop if pop is None else pop
         trait_new.name = self.name
         trait_new.type = self.type
         trait_new.y = self.y[i_keep].copy()
@@ -626,5 +840,10 @@ class Trait:
                 trait_new.inputs[key] = copy.deepcopy(value)
         trait_new._refresh_derived_inputs()
 
-        trait_new._update_initial_variances()
+        if trait_new.type == 'composite':
+            trait_new._drop_random_effects_for_population_reshape(reason='subsetting a population')
+            trait_new._refresh_dynamic_random_effects()
+            trait_new.validate()
+        else:
+            trait_new._update_initial_variances()
         return trait_new
