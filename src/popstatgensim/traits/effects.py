@@ -509,6 +509,18 @@ class RandomEffect(Effect):
     def _make_rng(self) -> np.random.Generator:
         return np.random.default_rng(self.seed)
 
+    def _raise_zero_variance_kernel_error(self):
+        source_label = self.source if isinstance(self.source, str) else 'the provided source values'
+        if self.kernel_type == 'categorical':
+            raise ValueError(
+                f"Random effect {self.name} cannot realize positive variance because "
+                f"categorical source '{source_label}' has only one populated cluster in the current population."
+            )
+        raise ValueError(
+            f"Random effect {self.name} cannot realize positive variance because its kernel "
+            'has zero centered variance in the current population.'
+        )
+
     def _compute_expected_centered_variance(self, Z: np.ndarray,
                                             A: np.ndarray) -> float:
         if Z is None:
@@ -532,6 +544,8 @@ class RandomEffect(Effect):
                 values = Z @ cluster_scores
 
         expected_var = self._compute_expected_centered_variance(Z=Z, A=A)
+        if np.isclose(expected_var, 0.0) and not np.isclose(self.var, 0.0):
+            self._raise_zero_variance_kernel_error()
         return random_effects_utils.scale_random_effect(
             values,
             target_var=self.var,
@@ -566,6 +580,8 @@ class RandomEffect(Effect):
             else:
                 raw_values = np.zeros(reference_values.shape[0], dtype=float)
             expected_var = self._compute_expected_centered_variance(Z=Z, A=A)
+            if np.isclose(expected_var, 0.0) and not np.isclose(self.var, 0.0):
+                self._raise_zero_variance_kernel_error()
             return random_effects_utils.scale_random_effect(
                 raw_values,
                 target_var=self.var,

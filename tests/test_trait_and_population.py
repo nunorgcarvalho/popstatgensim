@@ -66,6 +66,21 @@ def test_trait_add_popstrat_adds_cluster_constant_component_after_join():
     np.testing.assert_allclose(trait.y, base_component)
 
 
+def test_add_popstrat_requires_more_than_one_populated_subpopulation():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=21)
+    spop = psg.SuperPopulation([pop])
+    spop.add_subpop_trait()
+    pop.add_trait(
+        name="y",
+        effects={"base": FixedEffect(name="base", beta=1.0, input_name="x")},
+        inputs={"x": np.arange(pop.N, dtype=float)},
+        var_Eps=0.5,
+    )
+
+    with pytest.raises(ValueError, match="only one populated cluster"):
+        pop.traits["y"].add_popstrat(variance=0.4)
+
+
 def test_validate_moves_eps_component_to_the_end():
     pop = psg.Population(N=6, M=4, p_init=0.3, seed=11)
     pop.add_trait(
