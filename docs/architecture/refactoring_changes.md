@@ -60,3 +60,23 @@ Planned next:
 2. Move the current notebooks out of `tests/` into a more appropriate examples/notebooks location.
 3. Write a maintainer-facing repository structure document under `docs/architecture/`.
 4. Continue making staged git commits at coherent milestones.
+
+## Phase 3: Verification and repository cleanup
+
+Completed:
+
+1. Added pytest-based automated checks under `tests/` covering:
+   root API imports, subpackage exposure, genetics/genome helpers, trait/population workflows, and estimation entrypoints.
+2. Added `tests/conftest.py` to make the `src/` layout importable under pytest and to stabilize matplotlib test behavior.
+3. Moved exploratory notebooks from `tests/` to `notebooks/`.
+4. Wrote `docs/architecture/repository_structure.md` as a future maintainer guide for the refactored repo layout.
+
+Validation performed:
+
+1. Ran `/n/groups/price/nuno/.venv_py13/bin/python -m pytest /n/groups/price/nuno/psgs-codex/tests -q`
+2. Confirmed all tests pass after moving notebooks out of `tests/`.
+
+Planned next:
+
+1. Create the next git checkpoint for tests, docs, and repo cleanup.
+2. Review whether any additional structural cleanup is needed before stopping.
