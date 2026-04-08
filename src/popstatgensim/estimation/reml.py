@@ -288,6 +288,8 @@ def _he_warmstart(
     X: np.ndarray | None = None,
 ) -> np.ndarray:
     """Generic HE-based warm start used when a fast dense-GRM shortcut is unavailable."""
+    from .he import _he_regression_core
+
     theta, _, _, _, _ = _he_regression_core(
         y=y,
         Vs=Vs,
