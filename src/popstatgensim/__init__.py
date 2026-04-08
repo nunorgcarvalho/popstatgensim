@@ -1,9 +1,33 @@
-# popstatgensim package initialization
-from .popsim import *
-from .core_functions import *
-from .export_functions import *
-from .popgen_functions import *
-from .reml import *
-from .statgen_functions import *
+"""Public package interface for popstatgensim."""
 
-# i import everything right now although I probably shouldn't
+from . import estimation, genetics, genome, io, pedigree, plotting, simulation, traits, utils
+from .estimation import run_HE_regression, run_HEreg, run_REML
+from .genetics import PCAResult
+from .io import export_GRM_GCTA, export_trait
+from .simulation import Population, SuperPopulation
+from .traits import CorrelatedRandomEffect, FixedEffect, GeneticEffect, NoiseEffect, Trait
+
+__all__ = [
+    "Population",
+    "SuperPopulation",
+    "Trait",
+    "GeneticEffect",
+    "FixedEffect",
+    "CorrelatedRandomEffect",
+    "NoiseEffect",
+    "PCAResult",
+    "run_HEreg",
+    "run_HE_regression",
+    "run_REML",
+    "export_GRM_GCTA",
+    "export_trait",
+    "genetics",
+    "genome",
+    "pedigree",
+    "traits",
+    "simulation",
+    "estimation",
+    "plotting",
+    "io",
+    "utils",
+]

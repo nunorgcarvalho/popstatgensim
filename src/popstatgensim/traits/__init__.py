@@ -1,8 +1,6 @@
-"""Compatibility wrapper for trait and estimation helpers moved into subpackages."""
+"""Trait and effect models."""
 
-from .plotting.estimation import plot_HE_regression
-from .reml import run_HEreg, run_HEreg as run_HE_regression, run_REML
-from .traits.effect_sampling import (
+from .effect_sampling import (
     compute_genetic_value,
     generate_causal_effects,
     generate_genetic_effects,
@@ -10,14 +8,9 @@ from .traits.effect_sampling import (
     get_G_std_for_effects,
     get_standardized_effects,
 )
-from .traits.fixed_effects import scale_binary_FE
-from .traits.random_effects import (
-    _calibrate_random_fixed_loading,
-    _calibrate_random_fixed_loading_from_propagated,
-    _center_and_scale_random_effect,
-    _get_kappa,
-    _standardize_correlation_matrix,
-    _validate_random_effect_inputs,
+from .effects import CorrelatedRandomEffect, Effect, FixedEffect, GeneticEffect, NoiseEffect
+from .fixed_effects import scale_binary_FE
+from .random_effects import (
     apply_identity_cluster_kernel_sqrt,
     build_design_matrix_from_groups,
     get_group_assignments_from_design,
@@ -27,8 +20,15 @@ from .traits.random_effects import (
     nearest_correlation_matrix,
     psd_sqrt,
 )
+from .trait import Trait
 
 __all__ = [
+    "Effect",
+    "GeneticEffect",
+    "FixedEffect",
+    "CorrelatedRandomEffect",
+    "NoiseEffect",
+    "Trait",
     "generate_causal_effects",
     "generate_genetic_effects",
     "compute_genetic_value",
@@ -39,19 +39,9 @@ __all__ = [
     "psd_sqrt",
     "nearest_correlation_matrix",
     "build_design_matrix_from_groups",
-    "_standardize_correlation_matrix",
-    "_center_and_scale_random_effect",
     "is_identity_matrix",
     "get_group_assignments_from_design",
     "apply_identity_cluster_kernel_sqrt",
     "get_identity_cluster_kernel_trace",
-    "_calibrate_random_fixed_loading_from_propagated",
-    "_get_kappa",
-    "_validate_random_effect_inputs",
-    "_calibrate_random_fixed_loading",
     "get_random_effects",
-    "plot_HE_regression",
-    "run_HEreg",
-    "run_HE_regression",
-    "run_REML",
 ]
