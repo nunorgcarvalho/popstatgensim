@@ -11,11 +11,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import sparse
 
-from .. import core_functions as core
-from .. import popgen_functions as pop
-from .. import statgen_functions as stat
+from ..genetics import frequencies as genetics_frequencies
+from ..genetics import genotypes as genetics_genotypes
+from ..genetics import ld as genetics_ld
+from ..genetics import pca as genetics_pca
+from ..genome import structure as genome_structure
+from ..pedigree import ibd as pedigree_ibd
+from ..pedigree import relations as pedigree_relations
 from ..pedigree.pedigree import Pedigree
+from ..plotting import common as common_plotting
+from ..plotting import genetics as genetics_plotting
+from ..traits import effect_sampling as trait_sampling
 from ..traits.trait import Trait
+from ..utils import misc as misc_utils
+from ..utils import stats as stats_utils
 
 
 class Population:
@@ -43,7 +52,7 @@ class Population:
             M (int): Total number of variants in genome.
             P (int): Ploidy of genotpes. Default is 2 (diploid).
             p_init (float or array): Initial allele frequency of variants. If only a single value is provided, it is treated as the initial allele frequency for all variants. Alternatively, can be an array of length M for variant-specfic allele frequencies. If not provided, default is uniform distribution of allele frequencies between 0.05 and 0.95.
-            R_type (str). Type of recombination rates to use for genome. Options are: 'blocks' (default) for LD blocks (see pop.generate_LD_blocks()), 'indep' for independent sites (see self.make_sites_indep()), or 'uniform' for uniform recombination rates across genome (see pop.generate_chromosomes()). Resulting recombination rate array is stored in Population.R.
+            R_type (str). Type of genome structure to use. Options are: 'blocks' (default) for LD blocks, 'indep' for independent sites, or 'uniform' for uniform recombination rates across the genome. Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
             track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
@@ -57,13 +66,13 @@ class Population:
         
         # draws initial allele frequencies from uniform distribution between 0.05 and 0.95 if not specified
         if p_init is None:
-            p_init = pop.draw_p_init(M, method = 'uniform', params = (0.05, 0.95))
+            p_init = genome_structure.draw_p_init(M, method = 'uniform', params = (0.05, 0.95))
         elif type(p_init) == float or type(p_init) == int:
             # if only single value is given, all variants have same initial frequency
             p_init = np.full(M, p_init)
 
         # generates initial genotypes and records allele frequencies
-        H = pop.draw_binom_haplos(p_init, N, P)
+        H = genome_structure.draw_binom_haplos(p_init, N, P)
 
         # passes haplotype to base constructor for further initialization
         self._initialize_H(
@@ -87,7 +96,7 @@ class Population:
         Initializes a population from a given haplotype array.
         Parameters:
             H (3D array): N*M*P array of haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
-            R_type (str). Type of recombination rates to use for genome. Options are: 'blocks' (default) for LD blocks (see pop.generate_LD_blocks()), 'indep' for independent sites (see self.make_sites_indep()), or 'uniform' for uniform recombination rates across genome (see pop.generate_chromosomes()). Resulting recombination rate array is stored in Population.R.
+            R_type (str). Type of genome structure to use. Options are: 'blocks' (default) for LD blocks, 'indep' for independent sites, or 'uniform' for uniform recombination rates across the genome. Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
             track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
@@ -134,11 +143,11 @@ class Population:
         self._X_dtype = np.float32
         # recombination rates
         if R_type == 'blocks':
-            self.R = pop.generate_LD_blocks(self.M)
+            self.R = genome_structure.generate_LD_blocks(self.M)
         elif R_type == 'indep':
             self.make_sites_indep()
         elif R_type == 'uniform':
-            self.R = pop.generate_chromosomes(self.M, chrs=1, meioses_per_chr=1)
+            self.R = genome_structure.generate_chromosomes(self.M, chrs=1, meioses_per_chr=1)
         self.K = np.diag(np.ones(self.N)) # kinship matrix (initially identity, not functional yet)
         self.track_pedigree = track_pedigree # whether to track pedigree information
         self.track_haplotypes = bool(track_haplotypes)
@@ -154,12 +163,12 @@ class Population:
         # further attributes
         self._update_obj(H=H, Haplos=Haplos, update_past=False)
         self.assign_sex() # assigns sex (F:0 / M:1)
-        self.relations = pop.initialize_relations(self.N)
+        self.relations = pedigree_relations.initialize_relations(self.N)
         self.ped = Pedigree(self.N)
 
         # defines metrics
         self.metric = {}
-        self._define_metric('p', pop.compute_freqs, shape = [self.M], # allele frequency
+        self._define_metric('p', genetics_genotypes.compute_freqs, shape = [self.M], # allele frequency
                             P = self.P)
         self._initialize_metrics(G = self.G)
     
@@ -202,7 +211,7 @@ class Population:
         Lazily computes and caches the standardized genotype matrix.
         '''
         if self._X is None:
-            X = pop.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
+            X = genetics_genotypes.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
             self._X = np.asarray(X, dtype=self._X_dtype)
         return self._X
 
@@ -224,14 +233,14 @@ class Population:
         '''
         Returns a dense matrix representation of one stored relation.
         '''
-        return pop.get_relation_matrix(self.relations, relation, self.N, dtype=dtype)
+        return pedigree_relations.get_relation_matrix(self.relations, relation, self.N, dtype=dtype)
 
     def get_G_std(self) -> np.ndarray:
         '''
         Returns cached genotype standard deviations for the current generation.
         '''
         if self._G_std is None:
-            self._G_std = np.asarray(stat.get_G_std_for_effects(self.G, P=self.P), dtype=np.float32)
+            self._G_std = np.asarray(trait_sampling.get_G_std_for_effects(self.G, P=self.P), dtype=np.float32)
         return self._G_std
 
     def get_Gpar_std(self, G_par: np.ndarray = None) -> np.ndarray:
@@ -242,11 +251,11 @@ class Population:
             if self._G_par_std is None:
                 G_par = self.get_Gpar()
                 self._G_par_std = np.asarray(
-                    stat.get_G_std_for_effects(G_par, P=2 * self.P),
+                    trait_sampling.get_G_std_for_effects(G_par, P=2 * self.P),
                     dtype=np.float32,
                 )
             return self._G_par_std
-        return np.asarray(stat.get_G_std_for_effects(G_par, P=2 * self.P), dtype=np.float32)
+        return np.asarray(trait_sampling.get_G_std_for_effects(G_par, P=2 * self.P), dtype=np.float32)
 
 
     ###################################
@@ -271,11 +280,11 @@ class Population:
         
         if H is not None:
             self.H = H
-            self.G = pop.make_G(self.H)
+            self.G = genetics_genotypes.make_G(self.H)
             self.G_par = None
             self._G_std = None
             self._G_par_std = None
-            self.p = pop.compute_freqs(self.G, self.P)
+            self.p = genetics_genotypes.compute_freqs(self.G, self.P)
             self.X = None
         if Haplos is not None:
             self.Haplos = Haplos
@@ -329,13 +338,13 @@ class Population:
 
     def store_neighbor_matrix(self, LDwindow: float = None) -> sparse.coo_matrix:
         '''
-        Stores boolean sparse matrix of variants (`neighbor_matrix`) within the specified LD window distance (`LDwindow`) based on object's variant positions (currently only supports `BPs`). Calls `make_neighbor_matrix()` from `popgen_functions.py`.
+        Stores a boolean sparse matrix of variants (`neighbor_matrix`) within the specified LD window distance (`LDwindow`) based on the object's variant positions (currently only supports `BPs`).
         Parameters:
             LDwindow (float): Maximum distance between variants to be considered neighbors. In the same units as the positions used. If not provided, defaults to infinite maximum distance.
         '''
         # by default, uses object's base pair positions
         positions = self.BPs
-        self.neighbor_matrix = pop.make_neighbor_matrix(positions=positions, LDwindow=LDwindow)
+        self.neighbor_matrix = genetics_ld.make_neighbor_matrix(positions=positions, LDwindow=LDwindow)
 
     def store_LD_matrix(self):
         '''
@@ -348,14 +357,14 @@ class Population:
         '''
         if not hasattr(self, 'neighbor_matrix'):
             raise Exception('Must have pre-computed neighbor_matrix. Use `Population.store_neighbor_matrix()`.')
-        self.corr_matrix = pop.compute_corr_matrix(self.X, self.neighbor_matrix)
-        self.LD_matrix = pop.compute_LD_matrix(self.corr_matrix)
+        self.corr_matrix = genetics_ld.compute_corr_matrix(self.X, self.neighbor_matrix)
+        self.LD_matrix = genetics_ld.compute_LD_matrix(self.corr_matrix)
 
     def store_GRM(self):
         '''
-        Stores the genetic relationship matrix (GRM) in the `GRM` attribute using object's standardized genotype matrix. Calls `compute_GRM()` from `popgen_functions.py`.
+        Stores the genetic relationship matrix (GRM) in the `GRM` attribute using the object's standardized genotype matrix.
         '''
-        self.GRM = pop.compute_GRM(self.X)
+        self.GRM = genetics_genotypes.compute_GRM(self.X)
 
     def get_relatedness_matrix(self, source: str = 'GRM',
                                standardize_ibd: bool = False) -> np.ndarray:
@@ -365,7 +374,7 @@ class Population:
             source (str): Which relatedness measure to use. Options are:
                 - 'GRM' (default): SNP-based genomic relationship matrix from `Population.X`.
                 - 'IBD': True relatedness from tracked haplotype IDs.
-            standardize_ibd (bool): Passed to `pop.compute_K_IBD()` when
+            standardize_ibd (bool): Passed to the true-IBD relatedness computation when
                 `source='IBD'`. Default is False.
         Returns:
             relatedness (2D array): N*N relatedness matrix.
@@ -374,10 +383,10 @@ class Population:
         if source == 'GRM':
             if hasattr(self, 'GRM') and self.GRM is not None:
                 return np.asarray(self.GRM, dtype=float)
-            return np.asarray(pop.compute_GRM(self.X), dtype=float)
+            return np.asarray(genetics_genotypes.compute_GRM(self.X), dtype=float)
         if source == 'IBD':
             return np.asarray(
-                pop.compute_K_IBD(self.Haplos, standardize=standardize_ibd),
+                pedigree_ibd.compute_K_IBD(self.Haplos, standardize=standardize_ibd),
                 dtype=float,
             )
         raise ValueError("source must be either 'GRM' or 'IBD'.")
@@ -461,7 +470,7 @@ class Population:
                 parent_map = np.full(parent_N_old, -1, dtype=np.int32)
                 parent_map[parent_keep] = np.arange(parent_keep.size, dtype=np.int32)
 
-        relations_new = pop.initialize_relations(new_pop.N)
+        relations_new = pedigree_relations.initialize_relations(new_pop.N)
 
         spouse_ids = np.asarray(self.relations['spouses'], dtype=np.int32)[i_keep]
         spouse_new = np.full(new_pop.N, -1, dtype=np.int32)
@@ -536,7 +545,7 @@ class Population:
                 source=source,
                 standardize_ibd=standardize_ibd,
             )
-        return pop.greedy_unrelated_subset(relatedness, threshold)
+        return pedigree_ibd.greedy_unrelated_subset(relatedness, threshold)
 
     def prune_related_individuals(self, threshold: float,
                                   source: str = 'GRM',
@@ -591,31 +600,31 @@ class Population:
             - `X_par` is the standardized version of `G_par` with column mean 0 and variance 2.
         '''
         G_o = self.G
-        X_o = pop.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
+        X_o = genetics_genotypes.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
 
         if G_par is None:
             G_par = self.get_Gpar()
         p_par = G_par.mean(axis=0) / (2 * self.P)
-        X_par = pop.standardize_G(G_par, p_par, 2 * self.P, impute=True,
+        X_par = genetics_genotypes.standardize_G(G_par, p_par, 2 * self.P, impute=True,
                                   std_method='observed', target_var=2.0)
 
         M = G_o.shape[1]
-        R_oo = pop.compute_GRM(X_o)
-        R_pp = pop.compute_GRM(X_par) / 2
+        R_oo = genetics_genotypes.compute_GRM(X_o)
+        R_pp = genetics_genotypes.compute_GRM(X_par) / 2
         R_op = (X_o @ X_par.T + X_par @ X_o.T) / (2 * M)
 
         return [R_oo, R_pp, R_op]
 
-    def compute_PCA(self, n_components: int = 2, **kwargs) -> pop.PCAResult:
+    def compute_PCA(self, n_components: int = 2, **kwargs) -> genetics_pca.PCAResult:
         '''
         Computes a PCA for the current population.
         Parameters:
             n_components (int): Number of leading PCs to compute.
-            **kwargs: Additional arguments passed to `pop.compute_PCA()`.
+            **kwargs: Additional arguments passed to the PCA computation helper.
         Returns:
-            pop.PCAResult: PCA result object for the current population.
+            PCAResult: PCA result object for the current population.
         '''
-        return pop.compute_PCA(
+        return genetics_pca.compute_PCA(
             G=self.G,
             p=self.p,
             P=self.P,
@@ -676,9 +685,9 @@ class Population:
             G_std = kwargs.pop('G_std', None) if effect_name == 'A' else kwargs.pop('G_par_std', None)
             if G_std is None:
                 if effect_name == 'A' and 'G' in kwargs:
-                    G_std = stat.get_G_std_for_effects(np.asarray(kwargs['G']))
+                    G_std = trait_sampling.get_G_std_for_effects(np.asarray(kwargs['G']))
                 elif effect_name == 'A_par' and 'G_par' in kwargs:
-                    G_std = stat.get_G_std_for_effects(np.asarray(kwargs['G_par']))
+                    G_std = trait_sampling.get_G_std_for_effects(np.asarray(kwargs['G_par']))
             effect_objects[effect_name] = GeneticEffect.from_effects(
                 effects=effect_values,
                 is_standardized=is_standardized,
@@ -881,7 +890,7 @@ class Population:
         # effect of mutation (in gametes that lead to new generation, i.e. post-selection)
         p = p*(1-mu) + (1-p)*mu
         # effect of genetic drift
-        H = pop.draw_binom_haplos(p, self.N, self.P)
+        H = genome_structure.draw_binom_haplos(p, self.N, self.P)
 
         return H
 
@@ -1022,7 +1031,7 @@ class Population:
         if spouse_values_1.std() == 0 or spouse_values_2.std() == 0:
             return np.nan
 
-        return core.corr(spouse_values_1, spouse_values_2)
+        return stats_utils.corr(spouse_values_1, spouse_values_2)
 
     def get_Gpar(self) -> np.ndarray:
         '''
@@ -1179,7 +1188,7 @@ class Population:
         spop.join_populations(pops_i, shared_haplotypes=self.track_haplotypes)
         new_pop = spop.pops[-1] # the last population in the SuperPopulation is the combined one
         new_pop.keep_past_generations = self.keep_past_generations
-        new_pop.relations = pop.initialize_relations(new_pop.N, N1=new_pop.N, parent_source='current')
+        new_pop.relations = pedigree_relations.initialize_relations(new_pop.N, N1=new_pop.N, parent_source='current')
 
         # updates relationship matrices in combined population
         Ns_cumsum = np.cumsum([0] + Ns)
@@ -1246,7 +1255,7 @@ class Population:
                         # converts i's ancestor ID (in end_gen indices) to index from i_gen_ancs
                         i_gen_closest_k = np.where(np.isin(i_gen_ancs, i_gen_closest))[0][0]
                         # converts this index to an array of bits, which informs whether a maternal or paternal meiosis happens as one goes up i's lineage to get to their closest ancestor to j
-                        i_gen_closest_bits = np.array( core.to_bits(i_gen_closest_k, gap) )
+                        i_gen_closest_bits = np.array(misc_utils.to_bits(i_gen_closest_k, gap))
                         up_sexes = tuple( i_gen_closest_bits + 1 ) # converts to sex-informed path steps
 
                         # takes path of i's ancestor to j and extends it by the specified meioses
@@ -1320,9 +1329,9 @@ class Population:
                 if i in j_idxs and i >= j:
                     continue # skips same individual and duplicate pairs
                 # gets IBD tensor between individuals i and j
-                IBD_tensor_ij = pop.get_true_IBD_tensor(self.Haplos[i,:,:], self.Haplos[j,:,:])
+                IBD_tensor_ij = pedigree_ibd.get_true_IBD_tensor(self.Haplos[i,:,:], self.Haplos[j,:,:])
                 # gets list of IBD segments between individuals i and j
-                IBD_segments_ij = pop.IBD_tensor_to_segments(IBD_tensor_ij, i_chrs=i_chrs, j_chrs=j_chrs)
+                IBD_segments_ij = pedigree_ibd.IBD_tensor_to_segments(IBD_tensor_ij, i_chrs=i_chrs, j_chrs=j_chrs)
                 # adds individual i and j information to each segment
                 for seg in IBD_segments_ij:
                     seg.i = i
@@ -1336,7 +1345,7 @@ class Population:
     #### Visualization ####
     #######################
 
-    def plot_PCA(self, pca: pop.PCAResult = None,
+    def plot_PCA(self, pca: genetics_pca.PCAResult = None,
                  pcs: Tuple[int, int] = (1, 2),
                  color_by: str = None,
                  categorical: bool = None,
@@ -1346,7 +1355,7 @@ class Population:
         '''
         Plots a PCA for the current population.
         Parameters:
-            pca (pop.PCAResult): Optional pre-computed PCA result.
+            pca (PCAResult): Optional pre-computed PCA result.
             pcs (tuple): Two 1-based PCs to plot.
             color_by (str): Optional trait name used to color points.
             categorical (bool): Whether to treat `color_by` values as categorical.
@@ -1355,7 +1364,7 @@ class Population:
             n_components (int): Number of PCs to compute if `pca` is not provided.
                 Defaults to the largest PC index requested in `pcs`.
             title (str): Plot title.
-            **kwargs: Additional arguments passed to `pop.plot_PCA()`.
+            **kwargs: Additional arguments passed to the PCA plotting helper.
         Returns:
             matplotlib axis: Axis containing the PCA plot.
         '''
@@ -1372,7 +1381,7 @@ class Population:
             if categorical is None and color_by == 'subpop':
                 categorical = True
 
-        return pop.plot_PCA(
+        return genetics_plotting.plot_PCA(
             pca,
             pcs=pcs,
             values=values,
@@ -1413,7 +1422,7 @@ class Population:
         
         # if True, gets mean and quartiles for variants over time, which are plotted instead
         if summarize:
-            ps_mean, ps_quantile = pop.summarize_ps(ps, quantiles)
+            ps_mean, ps_quantile = genetics_frequencies.summarize_ps(ps, quantiles)
             metrics = np.column_stack((ps_mean, ps_quantile.T))
             aes_line = {'color': ['deepskyblue'] + ['lightskyblue'] * len(quantiles),
                         'ls': ['--'] + [':'] * len(quantiles),
@@ -1428,7 +1437,7 @@ class Population:
                'xlabel': 'Generation',
                'ylabel': 'Allele Frequency'}
 
-        core.plot_over_time(metrics, ts, aes=aes, aes_line=aes_line, vlines = self.T_breaks, legend=legend)
+        common_plotting.plot_over_time(metrics, ts, aes=aes, aes_line=aes_line, vlines = self.T_breaks, legend=legend)
         
     def plot_LD_matrix(self, LD_matrix: sparse.csr_matrix = None,
                       plot_range: Tuple[int, int] = None, type: str = 'LD',
@@ -1474,4 +1483,3 @@ class Population:
         plt.xlabel('Variant Index')
         plt.ylabel('Variant Index')
         plt.show()
-

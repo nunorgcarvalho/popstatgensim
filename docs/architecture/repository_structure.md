@@ -143,9 +143,9 @@ Typical contents:
 
 ## Root Package Files
 
-The package root contains the curated public API in `__init__.py` and a small set of facade modules that re-export stable symbols from the domain subpackages.
+The package root contains the curated public API in `__init__.py`.
 
-These root-level facade modules are useful for compatibility and convenience, but new implementation work should generally go into the domain subpackages rather than into root-level facades.
+Implementation code should live in the domain subpackages, not in additional flat modules at the package root. New functionality should be added by extending the relevant domain package rather than by introducing one-off root-level helper files.
 
 ## Dependency Direction
 

@@ -8,7 +8,8 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 
-from .. import statgen_functions as stat
+from . import effect_sampling as sampling
+from . import random_effects as random_effects_utils
 
 
 class Effect:
@@ -59,7 +60,7 @@ class GeneticEffect(Effect):
         self.effects_per_allele = None
         self._rescale_to_var_indep = None
 
-        effects_standardized, j_causal = stat.generate_causal_effects(
+        effects_standardized, j_causal = sampling.generate_causal_effects(
             self.M, self.M_causal, self.var_indep, dist
         )
         self.effects_standardized = effects_standardized
@@ -145,7 +146,7 @@ class GeneticEffect(Effect):
             )
 
         if self.G_std is not None:
-            self.effects_per_allele = stat.get_standardized_effects(
+            self.effects_per_allele = sampling.get_standardized_effects(
                 self.effects_standardized, self.G_std, std2allelic=True
             )
         self._rescale_to_var_indep = None
@@ -164,7 +165,7 @@ class GeneticEffect(Effect):
             G = np.asarray(G)
             if G.ndim != 2:
                 raise ValueError('G must be a 2D array.')
-            G_std = stat.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
+            G_std = sampling.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
         else:
             G_std = np.asarray(G_std, dtype=float)
             if G_std.ndim != 1:
@@ -178,11 +179,11 @@ class GeneticEffect(Effect):
         if self.effects_per_allele is None:
             if self.effects_standardized is None:
                 raise ValueError('No effects are stored for this GeneticEffect.')
-            self.effects_per_allele = stat.get_standardized_effects(
+            self.effects_per_allele = sampling.get_standardized_effects(
                 self.effects_standardized, self.G_std, std2allelic=True
             )
 
-        self.effects_standardized = stat.get_standardized_effects(
+        self.effects_standardized = sampling.get_standardized_effects(
             self.effects_per_allele, self.G_std, std2allelic=False
         )
 
@@ -220,7 +221,7 @@ class GeneticEffect(Effect):
             raise ValueError(f'Per-allele effects are not available for effect {self.name}.')
         if G.shape[1] != self.M:
             raise ValueError(f"Input '{self.input_name}' has incompatible number of variants for effect {self.name}.")
-        values = stat.compute_genetic_value(G, self.effects_per_allele)
+        values = sampling.compute_genetic_value(G, self.effects_per_allele)
 
         if self.force_var:
             if self.var_indep is None:
@@ -392,7 +393,7 @@ class CorrelatedRandomEffect(Effect):
                 f'cluster_source for correlated random effect {self.name} must resolve to a length-{N} 1D array.'
             )
 
-        Z = stat.build_design_matrix_from_groups(groups)
+        Z = random_effects_utils.build_design_matrix_from_groups(groups)
         A = np.eye(Z.shape[1], dtype=float) if self.A is None else np.asarray(self.A, dtype=float)
         return (Z, A)
 
@@ -402,13 +403,13 @@ class CorrelatedRandomEffect(Effect):
         Fast path for identity cluster relationship matrices, which avoids dense
         N x N kernel eigendecompositions.
         '''
-        if A is None or not stat.is_identity_matrix(A):
+        if A is None or not random_effects_utils.is_identity_matrix(A):
             return None
 
         if Z is None:
             assignments = np.arange(reference_values.shape[0], dtype=np.int32)
         else:
-            assignments = stat.get_group_assignments_from_design(Z)
+            assignments = random_effects_utils.get_group_assignments_from_design(Z)
             if assignments is None:
                 return None
 
@@ -424,9 +425,9 @@ class CorrelatedRandomEffect(Effect):
             )
 
         y_fixed = u_fixed / np.sqrt(reference_var)
-        propagated = stat.apply_identity_cluster_kernel_sqrt(assignments, y_fixed)
-        trace_random = stat.get_identity_cluster_kernel_trace(assignments)
-        rho = stat._calibrate_random_fixed_loading_from_propagated(
+        propagated = random_effects_utils.apply_identity_cluster_kernel_sqrt(assignments, y_fixed)
+        trace_random = random_effects_utils.get_identity_cluster_kernel_trace(assignments)
+        rho = random_effects_utils._calibrate_random_fixed_loading_from_propagated(
             u_fixed=u_fixed,
             propagated=propagated,
             trace_random=trace_random,
@@ -437,8 +438,8 @@ class CorrelatedRandomEffect(Effect):
 
         latent_noise = np.random.normal(size=reference_values.shape[0])
         latent_values = rho * y_fixed + np.sqrt(max(1.0 - rho * rho, 0.0)) * latent_noise
-        raw_values = stat.apply_identity_cluster_kernel_sqrt(assignments, latent_values)
-        return stat._center_and_scale_random_effect(raw_values, self.var, self.name)
+        raw_values = random_effects_utils.apply_identity_cluster_kernel_sqrt(assignments, latent_values)
+        return random_effects_utils._center_and_scale_random_effect(raw_values, self.var, self.name)
 
     def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
@@ -471,7 +472,7 @@ class CorrelatedRandomEffect(Effect):
                     f'Correlated random effect {self.name} cannot target non-zero correlation with '
                     f'zero-variance reference {self._reference_label()}.'
                 )
-            random_effects = stat.get_random_effects(
+            random_effects = random_effects_utils.get_random_effects(
                 Zs=[Z],
                 As=[A],
                 variances=[self.var],
@@ -480,7 +481,7 @@ class CorrelatedRandomEffect(Effect):
             return random_effects['values'][self.name]
 
         reference_name = f'{self.name}__reference'
-        random_effects = stat.get_random_effects(
+        random_effects = random_effects_utils.get_random_effects(
             Zs=[None, Z],
             As=[np.eye(N, dtype=float), A],
             variances=[reference_var, self.var],
@@ -510,7 +511,7 @@ class NoiseEffect(Effect):
         '''
         if 'N' not in inputs:
             raise ValueError("Missing required input 'N' for effect Eps.")
-        values = stat.generate_noise_value(int(inputs['N']), self.var)
+        values = sampling.generate_noise_value(int(inputs['N']), self.var)
         if not self.force_var:
             return values
 
@@ -520,4 +521,3 @@ class NoiseEffect(Effect):
                 return np.zeros_like(values)
             raise ValueError('Cannot rescale zero-variance noise component.')
         return values * np.sqrt(self.var / current_var)
-

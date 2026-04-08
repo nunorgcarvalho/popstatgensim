@@ -8,11 +8,14 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 
-from .. import core_functions as core
-from .. import popgen_functions as pop
+from ..genetics import genotypes as genetics_genotypes
+from ..genetics import pca as genetics_pca
 from ..pedigree.pedigree import Pedigree
+from ..pedigree import relations as pedigree_relations
+from ..plotting import genetics as genetics_plotting
 from ..traits.effects import FixedEffect, GeneticEffect, NoiseEffect
 from ..traits.trait import Trait
+from ..utils import misc as misc_utils
 from .population import Population
 
 
@@ -201,7 +204,7 @@ class SuperPopulation:
 
         # updates relations
         prev_N = joined_prev.N if joined_prev is not None else None
-        relations = pop.initialize_relations(new_pop.N, N1=prev_N)
+        relations = pedigree_relations.initialize_relations(new_pop.N, N1=prev_N)
         row_offsets = np.cumsum([0] + [pop_i.N for pop_i in gen_pops])
 
         next_family = 0
@@ -399,7 +402,7 @@ class SuperPopulation:
 
         for i, pop_i in enumerate(self.active_i):
             pop = self.pops[pop_i]
-            pop_kwargs = core.get_pop_kwargs(i, **kwargs)
+            pop_kwargs = misc_utils.get_pop_kwargs(i, **kwargs)
             pop.add_trait(name=name, effects=effects, **pop_kwargs)
 
     def add_subpop_trait(self, pop_i: Union[int, list] = None):
@@ -432,7 +435,7 @@ class SuperPopulation:
             # creates kwargs list for each population
             pop_kwargs = {}
             # simulates generations for the population using population-specific kwargs
-            pop_kwargs = core.get_pop_kwargs(i, **kwargs)
+            pop_kwargs = misc_utils.get_pop_kwargs(i, **kwargs)
             pop_kwargs['verbose'] = verbose
             if verbose:
                 print(f'Simulating population {pop_i}')
@@ -442,16 +445,16 @@ class SuperPopulation:
     #### Visualization ####
     #######################
     def compute_PCA(self, pop_i: Union[int, list] = None,
-                    n_components: int = 2, **kwargs) -> pop.PCAResult:
+                    n_components: int = 2, **kwargs) -> genetics_pca.PCAResult:
         '''
         Computes a PCA across one or more populations in the superpopulation.
         Parameters:
             pop_i (int or list): Population indices to include. Defaults to all active
                 populations.
             n_components (int): Number of leading PCs to compute.
-            **kwargs: Additional arguments passed to `pop.compute_PCA()`.
+            **kwargs: Additional arguments passed to the PCA computation helper.
         Returns:
-            pop.PCAResult: PCA result object for the selected individuals.
+            PCAResult: PCA result object for the selected individuals.
         '''
         pop_indices = self._resolve_population_indices(pop_i)
         pops_selected = [self.pops[i] for i in pop_indices]
@@ -465,8 +468,8 @@ class SuperPopulation:
                 )
 
         G = np.concatenate([pop_sel.G for pop_sel in pops_selected], axis=0)
-        p = pop.compute_freqs(G, P)
-        pca = pop.compute_PCA(
+        p = genetics_genotypes.compute_freqs(G, P)
+        pca = genetics_pca.compute_PCA(
             G=G,
             p=p,
             P=P,
@@ -476,7 +479,7 @@ class SuperPopulation:
         pca.metadata['pop_i'] = pop_indices
         return pca
 
-    def plot_PCA(self, pca: pop.PCAResult = None,
+    def plot_PCA(self, pca: genetics_pca.PCAResult = None,
                  pop_i: Union[int, list] = None,
                  pcs: Tuple[int, int] = (1, 2),
                  color_by: str = 'subpop',
@@ -487,7 +490,7 @@ class SuperPopulation:
         '''
         Plots a PCA across one or more populations in the superpopulation.
         Parameters:
-            pca (pop.PCAResult): Optional pre-computed PCA result.
+            pca (PCAResult): Optional pre-computed PCA result.
             pop_i (int or list): Population indices to include. Defaults to all active
                 populations.
             pcs (tuple): Two 1-based PCs to plot.
@@ -498,7 +501,7 @@ class SuperPopulation:
             n_components (int): Number of PCs to compute if `pca` is not provided.
                 Defaults to the largest PC index requested in `pcs`.
             title (str): Plot title.
-            **kwargs: Additional arguments passed to `pop.plot_PCA()`.
+            **kwargs: Additional arguments passed to the PCA plotting helper.
         Returns:
             matplotlib axis: Axis containing the PCA plot.
         '''
@@ -526,7 +529,7 @@ class SuperPopulation:
             if categorical is None and color_by == 'subpop':
                 categorical = True
 
-        return pop.plot_PCA(
+        return genetics_plotting.plot_PCA(
             pca,
             pcs=pcs,
             values=values,
@@ -548,4 +551,3 @@ class SuperPopulation:
                 continue
             print(f'Population {i}:')
             print(getattr(pop, attribute, 'Attribute not found.'))
-

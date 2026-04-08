@@ -80,3 +80,26 @@ Planned next:
 
 1. Create the next git checkpoint for tests, docs, and repo cleanup.
 2. Review whether any additional structural cleanup is needed before stopping.
+
+## Phase 4: Remove legacy compatibility modules
+
+Completed:
+
+1. Deleted the old flat compatibility modules from the package root:
+   `core_functions.py`, `export_functions.py`, `popgen_functions.py`,
+   `popsim.py`, `relative_types.py`, `statgen_functions.py`, and the old root `reml.py`.
+2. Updated internal imports so package code now points directly to the new domain modules.
+3. Moved the REML implementation into `src/popstatgensim/estimation/reml.py`.
+4. Moved the REML C accelerator into `src/popstatgensim/estimation/_reml_accel.c`.
+5. Updated `setup.py` so the compiled extension now builds as `popstatgensim.estimation._reml_accel`.
+6. Added tests asserting that the removed legacy flat modules are no longer importable.
+
+Validation performed:
+
+1. Ran `python3 -m py_compile` across the root package and all subpackages.
+2. Ran import smoke tests for the root package and the `simulation` / `estimation` namespaces.
+
+Planned next:
+
+1. Run the full pytest suite after the legacy-module removal.
+2. Create a final cleanup commit for the no-compatibility package layout.

@@ -1,6 +1,6 @@
-"""Shared internal helpers re-exported from the legacy REML module."""
+"""Shared internal helpers used across estimation entrypoints."""
 
-from ..reml import (
+from .reml import (
     _PreparedInputs,
     _as_optional_matrix_list,
     _build_v,

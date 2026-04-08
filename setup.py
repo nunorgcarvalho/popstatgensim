@@ -6,8 +6,8 @@ import numpy as np
 setup(
     ext_modules=[
         Extension(
-            "popstatgensim._reml_accel",
-            sources=["src/popstatgensim/_reml_accel.c"],
+            "popstatgensim.estimation._reml_accel",
+            sources=["src/popstatgensim/estimation/_reml_accel.c"],
             include_dirs=[np.get_include()],
             extra_compile_args=["-O3"],
         )

@@ -8,7 +8,7 @@ from typing import Union
 
 import numpy as np
 
-from .. import statgen_functions as stat
+from . import effect_sampling as sampling
 from .effects import CorrelatedRandomEffect, Effect, FixedEffect, GeneticEffect, NoiseEffect
 
 
@@ -75,7 +75,7 @@ class Trait:
                     raise ValueError("Trait input 'G_std' must be a 1D array matching the number of variants in G.")
                 self.inputs['G_std'] = G_std
             else:
-                self.inputs['G_std'] = stat.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
+                self.inputs['G_std'] = sampling.get_G_std_for_effects(G, P=int(G.max()) if G.size > 0 else None)
             N_candidates.append(G.shape[0])
         if 'G_par' in self.inputs:
             G_par = np.asarray(self.inputs['G_par'])
@@ -89,7 +89,7 @@ class Trait:
                     raise ValueError("Trait input 'G_par_std' must be a 1D array matching the number of variants in G_par.")
                 self.inputs['G_par_std'] = G_par_std
             else:
-                self.inputs['G_par_std'] = stat.get_G_std_for_effects(G_par, P=int(G_par.max()) if G_par.size > 0 else None)
+                self.inputs['G_par_std'] = sampling.get_G_std_for_effects(G_par, P=int(G_par.max()) if G_par.size > 0 else None)
             N_candidates.append(G_par.shape[0])
 
         fixed_input_names = {
@@ -408,7 +408,7 @@ class Trait:
                     )
 
                 G_current = np.asarray(self.inputs[effect.input_name])
-                values_unscaled = stat.compute_genetic_value(G_current, effect.effects_per_allele)
+                values_unscaled = sampling.compute_genetic_value(G_current, effect.effects_per_allele)
                 current_var = values_unscaled.var()
                 target_var = effect.var_indep
 
@@ -628,4 +628,3 @@ class Trait:
 
         trait_new._update_initial_variances()
         return trait_new
-

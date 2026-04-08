@@ -1,3 +1,7 @@
+import importlib
+
+import pytest
+
 import popstatgensim as psg
 
 
@@ -20,3 +24,20 @@ def test_root_public_api_exposes_main_namespaces():
     assert hasattr(psg, "plotting")
     assert hasattr(psg, "io")
     assert hasattr(psg, "utils")
+
+
+@pytest.mark.parametrize(
+    "legacy_module",
+    [
+        "popstatgensim.core_functions",
+        "popstatgensim.export_functions",
+        "popstatgensim.popgen_functions",
+        "popstatgensim.popsim",
+        "popstatgensim.relative_types",
+        "popstatgensim.reml",
+        "popstatgensim.statgen_functions",
+    ],
+)
+def test_legacy_flat_modules_are_no_longer_importable(legacy_module):
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(legacy_module)
