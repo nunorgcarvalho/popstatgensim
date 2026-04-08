@@ -12,6 +12,7 @@ def test_root_public_api_exposes_main_symbols():
     assert psg.GeneticEffect.__name__ == "GeneticEffect"
     assert callable(psg.run_HEreg)
     assert callable(psg.run_REML)
+    assert not hasattr(psg, "run_HE_regression")
 
 
 def test_root_public_api_exposes_main_namespaces():
