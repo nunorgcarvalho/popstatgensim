@@ -65,14 +65,12 @@ The long-term target is to replace the current flat module layout inside `src/po
 ```text
 src/popstatgensim/
   __init__.py
-  genetics/
+  genome/
     __init__.py
     genotypes.py
     pca.py
     ld.py
     frequencies.py
-  genome/
-    __init__.py
     structure.py
   pedigree/
     __init__.py
@@ -99,7 +97,7 @@ src/popstatgensim/
     _reml_accel.c
   plotting/
     __init__.py
-    genetics.py
+    genome.py
     estimation.py
     common.py
   io/
@@ -120,11 +118,11 @@ The codebase should follow a mostly one-way dependency flow:
 1. `utils` is the bottom layer.
    It contains generic helpers that do not depend on package-specific simulation classes.
 
-2. `genetics`, `genome`, `pedigree`, `traits`, and `estimation` are domain layers.
+2. `genome`, `pedigree`, `traits`, and `estimation` are domain layers.
    These may depend on `utils`, but should not depend on `simulation` unless there is a very strong reason.
 
 3. `simulation` is the orchestration layer.
-   It may depend on `genetics`, `genome`, `pedigree`, and `traits`, because `Population` and `SuperPopulation` combine those pieces into user-facing workflows.
+   It may depend on `genome`, `pedigree`, and `traits`, because `Population` and `SuperPopulation` combine those pieces into user-facing workflows.
 
 4. `plotting` and `io` are edge layers.
    They depend on the computational layers, but the computational layers should not depend on them.
@@ -194,7 +192,7 @@ This file currently contains several distinct conceptual domains and should be s
 
 #### 3.1 Genotype handling and basic matrix transforms
 
-Move to `genetics/genotypes.py`:
+Move to `genome/genotypes.py`:
 
 1. `make_G`
 2. `compute_freqs`
@@ -206,7 +204,7 @@ These are foundational genotype-matrix operations and should be easy to locate a
 
 #### 3.2 PCA
 
-Move to `genetics/pca.py`:
+Move to `genome/pca.py`:
 
 1. `PCAResult`
 2. `_validate_pca_axes`
@@ -214,7 +212,7 @@ Move to `genetics/pca.py`:
 4. `_format_pc_axis_label` if retained as an internal helper close to PCA logic
 5. `compute_PCA`
 
-Move plotting pieces to `plotting/genetics.py`:
+Move plotting pieces to `plotting/genome.py`:
 
 1. `plot_PCA`
 
@@ -226,20 +224,20 @@ Rationale:
 
 #### 3.3 Site-frequency and allele-frequency summaries
 
-Move to `genetics/frequencies.py`:
+Move to `genome/frequencies.py`:
 
-1. `draw_p_FST`
+1. `compute_freqs`
 2. `get_FST`
 3. `get_fixation_t`
 4. `summarize_ps`
 
-Move `plot_site_frequency_spectrum` to `plotting/genetics.py`.
+Move `plot_site_frequency_spectrum` to `plotting/genome.py`.
 
 If desired, site-frequency plotting could remain documented alongside frequency analysis, but implementation-wise it should still live in the plotting layer.
 
 #### 3.4 LD and neighborhood matrices
 
-Move to `genetics/ld.py`:
+Move to `genome/ld.py`:
 
 1. `make_neighbor_matrix`
 2. `compute_corr_matrix`
@@ -255,11 +253,12 @@ Move to `genome/structure.py`:
 2. `generate_LD_blocks`
 3. `generate_chromosomes`
 4. `draw_p_init`
+5. `draw_p_FST`
 
 Rationale:
 
 1. These functions define the structure of the genome and the joint distributional assumptions used when simulating haplotypes.
-2. They are conceptually separate from downstream genotype statistics and therefore fit better in a `genome` domain than in general `genetics`.
+2. They fit naturally beside the other genome-level modules that define how alleles are distributed and arranged before downstream analysis.
 
 #### 3.6 Compact family-relation helpers
 
@@ -459,7 +458,7 @@ The root package should likely expose a curated set of major public symbols such
 
 Additional domain namespaces should also be intentionally exposed, for example:
 
-1. `popstatgensim.genetics`
+1. `popstatgensim.genome`
 2. `popstatgensim.traits`
 3. `popstatgensim.estimation`
 4. `popstatgensim.io`
@@ -503,7 +502,7 @@ A typical test file would:
 
 ### What kinds of tests should be added
 
-1. Unit tests for pure genetics utilities.
+1. Unit tests for pure genome utilities.
    Example: genotype standardization, GRM computation, PCA shape and variance outputs.
 
 2. Unit tests for trait/effect helpers.
@@ -547,7 +546,7 @@ This refactor should be implemented in the dedicated worktree branch only.
 A good implementation strategy would involve intermediate commits grouped by coherent changes, for example:
 
 1. establish new package directories and move low-risk utility modules,
-2. split genetics modules,
+2. split genome modules,
 3. split trait/effect modules,
 4. split simulation and pedigree modules,
 5. split estimation modules,
@@ -566,7 +565,7 @@ To minimize breakage during the actual refactor, the implementation should likel
 
 1. Create the new subpackage directories and `__init__.py` files.
 2. Move low-risk pure-function modules first:
-   `utils`, `io`, `plotting`, and small genetics helpers.
+   `utils`, `io`, `plotting`, and small genome helpers.
 3. Split `popgen_functions.py` into domain files.
 4. Split `statgen_functions.py` into domain files.
 5. Split `popsim.py` into `simulation/`, `traits/`, and `pedigree/`.

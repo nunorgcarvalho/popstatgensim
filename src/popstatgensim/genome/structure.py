@@ -82,3 +82,49 @@ def draw_p_init(M, method: str, params: list) -> np.ndarray:
         return p_init
     else:
         return np.full(M, np.nan)
+
+def draw_p_FST(FST: float, p0: np.ndarray, dist: str = 'beta') -> np.ndarray:
+    '''
+    Draws allele frequencies with expected divergence from a starting frequency vector. The expected variance of the drawn allele frequencies is FST * p0 * (1 - p0), with mean p0.
+    Parameters:
+        FST (float): Target expected FST from the starting allele frequencies.
+        p0 (1D array): Array of length M containing starting allele frequencies.
+        dist (str): Distribution used to draw allele frequencies. Options are:
+            'beta': Draws p_j ~ Beta(p0_j * (1 - FST) / FST, (1 - p0_j) * (1 - FST) / FST).
+            'normal': Draws p_j ~ Normal(p0_j, FST * p0_j * (1 - p0_j)).
+    Returns:
+        p (1D array): Array of length M containing drawn allele frequencies.
+    '''
+    p0 = np.asarray(p0, dtype=float)
+
+    if p0.ndim != 1:
+        raise ValueError('`p0` must be a 1-dimensional array.')
+    if not np.all(np.isfinite(p0)):
+        raise ValueError('`p0` must contain only finite values.')
+    if np.any((p0 < 0) | (p0 > 1)):
+        raise ValueError('Allele frequencies in `p0` must lie between 0 and 1.')
+    if not np.isfinite(FST):
+        raise ValueError('`FST` must be finite.')
+    if FST < 0 or FST > 1:
+        raise ValueError('`FST` must lie between 0 and 1.')
+
+    dist = dist.lower()
+    if dist not in ('beta', 'normal'):
+        raise ValueError("`dist` must be either 'beta' or 'normal'.")
+
+    if FST == 0:
+        return p0.copy()
+
+    if dist == 'normal':
+        p = np.random.normal(loc=p0, scale=np.sqrt(FST * p0 * (1 - p0)))
+        return np.clip(p, 0, 1)
+
+    if FST == 1:
+        raise ValueError('`FST` must be strictly less than 1 when `dist="beta"`.')
+
+    p = p0.copy()
+    polymorphic_mask = (p0 > 0) & (p0 < 1)
+    param1 = p0[polymorphic_mask] * (1 - FST) / FST
+    param2 = (1 - p0[polymorphic_mask]) * (1 - FST) / FST
+    p[polymorphic_mask] = np.random.beta(param1, param2)
+    return p

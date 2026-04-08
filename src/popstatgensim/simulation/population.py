@@ -11,16 +11,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import sparse
 
-from ..genetics import frequencies as genetics_frequencies
-from ..genetics import genotypes as genetics_genotypes
-from ..genetics import ld as genetics_ld
-from ..genetics import pca as genetics_pca
+from ..genome import frequencies as genome_frequencies
+from ..genome import genotypes as genome_genotypes
+from ..genome import ld as genome_ld
+from ..genome import pca as genome_pca
 from ..genome import structure as genome_structure
 from ..pedigree import ibd as pedigree_ibd
 from ..pedigree import relations as pedigree_relations
 from ..pedigree.pedigree import Pedigree
 from ..plotting import common as common_plotting
-from ..plotting import genetics as genetics_plotting
+from ..plotting import genome as genome_plotting
 from ..traits import effect_sampling as trait_sampling
 from ..traits.trait import Trait
 from ..utils import misc as misc_utils
@@ -168,7 +168,7 @@ class Population:
 
         # defines metrics
         self.metric = {}
-        self._define_metric('p', genetics_genotypes.compute_freqs, shape = [self.M], # allele frequency
+        self._define_metric('p', genome_frequencies.compute_freqs, shape = [self.M], # allele frequency
                             P = self.P)
         self._initialize_metrics(G = self.G)
     
@@ -211,7 +211,7 @@ class Population:
         Lazily computes and caches the standardized genotype matrix.
         '''
         if self._X is None:
-            X = genetics_genotypes.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
+            X = genome_genotypes.standardize_G(self.G, self.p, self.P, impute=True, std_method='observed')
             self._X = np.asarray(X, dtype=self._X_dtype)
         return self._X
 
@@ -280,11 +280,11 @@ class Population:
         
         if H is not None:
             self.H = H
-            self.G = genetics_genotypes.make_G(self.H)
+            self.G = genome_genotypes.make_G(self.H)
             self.G_par = None
             self._G_std = None
             self._G_par_std = None
-            self.p = genetics_genotypes.compute_freqs(self.G, self.P)
+            self.p = genome_frequencies.compute_freqs(self.G, self.P)
             self.X = None
         if Haplos is not None:
             self.Haplos = Haplos
@@ -344,7 +344,7 @@ class Population:
         '''
         # by default, uses object's base pair positions
         positions = self.BPs
-        self.neighbor_matrix = genetics_ld.make_neighbor_matrix(positions=positions, LDwindow=LDwindow)
+        self.neighbor_matrix = genome_ld.make_neighbor_matrix(positions=positions, LDwindow=LDwindow)
 
     def store_LD_matrix(self):
         '''
@@ -357,14 +357,14 @@ class Population:
         '''
         if not hasattr(self, 'neighbor_matrix'):
             raise Exception('Must have pre-computed neighbor_matrix. Use `Population.store_neighbor_matrix()`.')
-        self.corr_matrix = genetics_ld.compute_corr_matrix(self.X, self.neighbor_matrix)
-        self.LD_matrix = genetics_ld.compute_LD_matrix(self.corr_matrix)
+        self.corr_matrix = genome_ld.compute_corr_matrix(self.X, self.neighbor_matrix)
+        self.LD_matrix = genome_ld.compute_LD_matrix(self.corr_matrix)
 
     def store_GRM(self):
         '''
         Stores the genetic relationship matrix (GRM) in the `GRM` attribute using the object's standardized genotype matrix.
         '''
-        self.GRM = genetics_genotypes.compute_GRM(self.X)
+        self.GRM = genome_genotypes.compute_GRM(self.X)
 
     def get_relatedness_matrix(self, source: str = 'GRM',
                                standardize_ibd: bool = False) -> np.ndarray:
@@ -383,7 +383,7 @@ class Population:
         if source == 'GRM':
             if hasattr(self, 'GRM') and self.GRM is not None:
                 return np.asarray(self.GRM, dtype=float)
-            return np.asarray(genetics_genotypes.compute_GRM(self.X), dtype=float)
+            return np.asarray(genome_genotypes.compute_GRM(self.X), dtype=float)
         if source == 'IBD':
             return np.asarray(
                 pedigree_ibd.compute_K_IBD(self.Haplos, standardize=standardize_ibd),
@@ -600,22 +600,22 @@ class Population:
             - `X_par` is the standardized version of `G_par` with column mean 0 and variance 2.
         '''
         G_o = self.G
-        X_o = genetics_genotypes.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
+        X_o = genome_genotypes.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
 
         if G_par is None:
             G_par = self.get_Gpar()
         p_par = G_par.mean(axis=0) / (2 * self.P)
-        X_par = genetics_genotypes.standardize_G(G_par, p_par, 2 * self.P, impute=True,
+        X_par = genome_genotypes.standardize_G(G_par, p_par, 2 * self.P, impute=True,
                                   std_method='observed', target_var=2.0)
 
         M = G_o.shape[1]
-        R_oo = genetics_genotypes.compute_GRM(X_o)
-        R_pp = genetics_genotypes.compute_GRM(X_par) / 2
+        R_oo = genome_genotypes.compute_GRM(X_o)
+        R_pp = genome_genotypes.compute_GRM(X_par) / 2
         R_op = (X_o @ X_par.T + X_par @ X_o.T) / (2 * M)
 
         return [R_oo, R_pp, R_op]
 
-    def compute_PCA(self, n_components: int = 2, **kwargs) -> genetics_pca.PCAResult:
+    def compute_PCA(self, n_components: int = 2, **kwargs) -> genome_pca.PCAResult:
         '''
         Computes a PCA for the current population.
         Parameters:
@@ -624,7 +624,7 @@ class Population:
         Returns:
             PCAResult: PCA result object for the current population.
         '''
-        return genetics_pca.compute_PCA(
+        return genome_pca.compute_PCA(
             G=self.G,
             p=self.p,
             P=self.P,
@@ -1345,7 +1345,7 @@ class Population:
     #### Visualization ####
     #######################
 
-    def plot_PCA(self, pca: genetics_pca.PCAResult = None,
+    def plot_PCA(self, pca: genome_pca.PCAResult = None,
                  pcs: Tuple[int, int] = (1, 2),
                  color_by: str = None,
                  categorical: bool = None,
@@ -1381,7 +1381,7 @@ class Population:
             if categorical is None and color_by == 'subpop':
                 categorical = True
 
-        return genetics_plotting.plot_PCA(
+        return genome_plotting.plot_PCA(
             pca,
             pcs=pcs,
             values=values,
@@ -1422,7 +1422,7 @@ class Population:
         
         # if True, gets mean and quartiles for variants over time, which are plotted instead
         if summarize:
-            ps_mean, ps_quantile = genetics_frequencies.summarize_ps(ps, quantiles)
+            ps_mean, ps_quantile = genome_frequencies.summarize_ps(ps, quantiles)
             metrics = np.column_stack((ps_mean, ps_quantile.T))
             aes_line = {'color': ['deepskyblue'] + ['lightskyblue'] * len(quantiles),
                         'ls': ['--'] + [':'] * len(quantiles),

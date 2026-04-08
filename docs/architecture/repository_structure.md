@@ -44,28 +44,21 @@ Automated regression and smoke tests live here. New functionality should general
 
 Inside `src/popstatgensim/`, the codebase is organized by domain:
 
-### `genetics/`
-
-Genotype-matrix operations and downstream genetics analyses.
-
-Typical contents:
-
-1. genotype transformations,
-2. GRM construction,
-3. PCA computation,
-4. LD helpers,
-5. allele-frequency summaries.
-
 ### `genome/`
 
-Genome structure and haplotype-generation assumptions.
+Genome structure, genotype-matrix operations, and genome-level analyses.
 
 Typical contents:
 
 1. initial allele-frequency generation,
-2. haplotype simulation,
-3. chromosome/recombination-map construction,
-4. genome-structure helpers used before downstream genetics analysis.
+2. divergence draws such as `draw_p_FST()`,
+3. haplotype simulation,
+4. chromosome/recombination-map construction,
+5. genotype transformations,
+6. GRM construction,
+7. PCA computation,
+8. LD helpers,
+9. allele-frequency summaries.
 
 ### `pedigree/`
 
@@ -99,7 +92,7 @@ Typical contents:
 
 1. `Population`,
 2. `SuperPopulation`,
-3. stateful orchestration over genetics, pedigree, and trait subsystems.
+3. stateful orchestration over genome, pedigree, and trait subsystems.
 
 ### `estimation/`
 
@@ -118,7 +111,7 @@ Visualization helpers only.
 Typical contents:
 
 1. common plotting helpers,
-2. genetics plots,
+2. genome-analysis plots,
 3. estimation plots.
 
 Plotting code should not become the authoritative home of scientific computations.
@@ -152,7 +145,7 @@ Implementation code should live in the domain subpackages, not in additional fla
 Preferred dependency flow:
 
 1. `utils` is the bottom layer.
-2. `genetics`, `genome`, `pedigree`, `traits`, and `estimation` build on `utils`.
+2. `genome`, `pedigree`, `traits`, and `estimation` build on `utils`.
 3. `simulation` depends on domain layers and coordinates user-facing workflows.
 4. `plotting` and `io` depend on outputs from computational layers.
 5. Lower-level computation should not depend on plotting or export code.

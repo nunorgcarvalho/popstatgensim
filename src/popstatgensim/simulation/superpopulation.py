@@ -8,11 +8,11 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 
-from ..genetics import genotypes as genetics_genotypes
-from ..genetics import pca as genetics_pca
+from ..genome import frequencies as genome_frequencies
+from ..genome import pca as genome_pca
 from ..pedigree.pedigree import Pedigree
 from ..pedigree import relations as pedigree_relations
-from ..plotting import genetics as genetics_plotting
+from ..plotting import genome as genome_plotting
 from ..traits.effects import FixedEffect, GeneticEffect, NoiseEffect
 from ..traits.trait import Trait
 from ..utils import misc as misc_utils
@@ -445,7 +445,7 @@ class SuperPopulation:
     #### Visualization ####
     #######################
     def compute_PCA(self, pop_i: Union[int, list] = None,
-                    n_components: int = 2, **kwargs) -> genetics_pca.PCAResult:
+                    n_components: int = 2, **kwargs) -> genome_pca.PCAResult:
         '''
         Computes a PCA across one or more populations in the superpopulation.
         Parameters:
@@ -468,8 +468,8 @@ class SuperPopulation:
                 )
 
         G = np.concatenate([pop_sel.G for pop_sel in pops_selected], axis=0)
-        p = genetics_genotypes.compute_freqs(G, P)
-        pca = genetics_pca.compute_PCA(
+        p = genome_frequencies.compute_freqs(G, P)
+        pca = genome_pca.compute_PCA(
             G=G,
             p=p,
             P=P,
@@ -479,7 +479,7 @@ class SuperPopulation:
         pca.metadata['pop_i'] = pop_indices
         return pca
 
-    def plot_PCA(self, pca: genetics_pca.PCAResult = None,
+    def plot_PCA(self, pca: genome_pca.PCAResult = None,
                  pop_i: Union[int, list] = None,
                  pcs: Tuple[int, int] = (1, 2),
                  color_by: str = 'subpop',
@@ -529,7 +529,7 @@ class SuperPopulation:
             if categorical is None and color_by == 'subpop':
                 categorical = True
 
-        return genetics_plotting.plot_PCA(
+        return genome_plotting.plot_PCA(
             pca,
             pcs=pcs,
             values=values,

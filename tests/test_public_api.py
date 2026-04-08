@@ -15,7 +15,6 @@ def test_root_public_api_exposes_main_symbols():
 
 
 def test_root_public_api_exposes_main_namespaces():
-    assert hasattr(psg, "genetics")
     assert hasattr(psg, "genome")
     assert hasattr(psg, "traits")
     assert hasattr(psg, "pedigree")
@@ -31,6 +30,7 @@ def test_root_public_api_exposes_main_namespaces():
     [
         "popstatgensim.core_functions",
         "popstatgensim.export_functions",
+        "popstatgensim.genetics",
         "popstatgensim.popgen_functions",
         "popstatgensim.popsim",
         "popstatgensim.relative_types",

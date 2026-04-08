@@ -1,11 +1,11 @@
-"""Plotting helpers for genetics analyses."""
+"""Plotting helpers for genome analyses."""
 
 from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ..genetics.pca import PCAResult, _format_pc_axis_label, _validate_pca_axes
+from ..genome.pca import PCAResult, _format_pc_axis_label, _validate_pca_axes
 
 
 def plot_site_frequency_spectrum(freqs: np.ndarray,

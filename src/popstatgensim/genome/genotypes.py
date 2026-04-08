@@ -14,18 +14,6 @@ def make_G(H: np.ndarray) -> np.ndarray:
     G = H.sum(axis=2).astype(np.uint8)
     return G
 
-def compute_freqs(G: np.ndarray, P: int) -> np.ndarray:
-    '''
-    Computes allele frequencies in genotypes.
-    Parameters:
-        G (2D array): N*M matrix of genotypes. First dimension is individuals, second dimension is variants. Each element is an integer ranging from 0 to P (the ploidy).
-        P (int): Ploidy of genotype matrix.
-    Returns:
-        p (1D array): Array of length M containing allele frequencies.
-    '''
-    p = G.mean(axis=0) / P
-    return p
-
 def center_G(G: np.ndarray, p: np.ndarray, P: int) -> np.ndarray:
     '''
     Centers genotype matrix so that the mean of each column is 0 (or approximately).

@@ -1,6 +1,6 @@
 import numpy as np
 
-from popstatgensim import genetics, genome
+from popstatgensim import genome
 
 
 def test_genotype_helpers_match_expected_small_example():
@@ -11,16 +11,16 @@ def test_genotype_helpers_match_expected_small_example():
         ],
         dtype=np.uint8,
     )
-    genotypes = genetics.make_G(haplotypes)
+    genotypes = genome.make_G(haplotypes)
 
     expected_genotypes = np.array([[1, 2], [2, 0]], dtype=np.uint8)
     np.testing.assert_array_equal(genotypes, expected_genotypes)
 
-    freqs = genetics.compute_freqs(genotypes, P=2)
+    freqs = genome.compute_freqs(genotypes, P=2)
     np.testing.assert_allclose(freqs, np.array([0.75, 0.5]))
 
-    standardized = genetics.standardize_G(genotypes, freqs, P=2, std_method="observed")
-    grm = genetics.compute_GRM(standardized)
+    standardized = genome.standardize_G(genotypes, freqs, P=2, std_method="observed")
+    grm = genome.compute_GRM(standardized)
 
     assert standardized.shape == (2, 2)
     np.testing.assert_allclose(grm, grm.T)
@@ -37,8 +37,8 @@ def test_pca_runs_from_refactored_namespace():
         ],
         dtype=float,
     )
-    freqs = genetics.compute_freqs(genotypes, P=2)
-    pca = genetics.compute_PCA(G=genotypes, p=freqs, P=2, n_components=2)
+    freqs = genome.compute_freqs(genotypes, P=2)
+    pca = genome.compute_PCA(G=genotypes, p=freqs, P=2, n_components=2)
 
     assert pca.scores.shape == (4, 2)
     assert pca.explained_variance_ratio.shape == (2,)
