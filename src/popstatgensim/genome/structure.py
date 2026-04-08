@@ -83,11 +83,13 @@ def draw_p_init(M, method: str, params: list) -> np.ndarray:
     else:
         return np.full(M, np.nan)
 
-def draw_p_FST(FST: float, p0: np.ndarray, dist: str = 'beta') -> np.ndarray:
+def draw_p_FST(FST: float | np.ndarray, p0: np.ndarray, dist: str = 'beta') -> np.ndarray:
     '''
     Draws allele frequencies with expected divergence from a starting frequency vector. The expected variance of the drawn allele frequencies is FST * p0 * (1 - p0), with mean p0.
     Parameters:
-        FST (float): Target expected FST from the starting allele frequencies.
+        FST (float or 1D array): Target expected FST from the starting allele
+            frequencies. If an array is provided, it must have the same length
+            as `p0` and gives a variant-specific expected FST.
         p0 (1D array): Array of length M containing starting allele frequencies.
         dist (str): Distribution used to draw allele frequencies. Options are:
             'beta': Draws p_j ~ Beta(p0_j * (1 - FST) / FST, (1 - p0_j) * (1 - FST) / FST).
@@ -103,23 +105,29 @@ def draw_p_FST(FST: float, p0: np.ndarray, dist: str = 'beta') -> np.ndarray:
         raise ValueError('`p0` must contain only finite values.')
     if np.any((p0 < 0) | (p0 > 1)):
         raise ValueError('Allele frequencies in `p0` must lie between 0 and 1.')
-    if not np.isfinite(FST):
-        raise ValueError('`FST` must be finite.')
-    if FST < 0 or FST > 1:
+    FST = np.asarray(FST, dtype=float)
+    if FST.ndim > 1:
+        raise ValueError('`FST` must be a scalar or a 1-dimensional array.')
+    if FST.ndim == 1:
+        if FST.shape != p0.shape:
+            raise ValueError('Array-valued `FST` must have the same shape as `p0`.')
+    if not np.all(np.isfinite(FST)):
+        raise ValueError('`FST` must contain only finite values.')
+    if np.any((FST < 0) | (FST > 1)):
         raise ValueError('`FST` must lie between 0 and 1.')
 
     dist = dist.lower()
     if dist not in ('beta', 'normal'):
         raise ValueError("`dist` must be either 'beta' or 'normal'.")
 
-    if FST == 0:
+    if np.all(FST == 0):
         return p0.copy()
 
     if dist == 'normal':
         p = np.random.normal(loc=p0, scale=np.sqrt(FST * p0 * (1 - p0)))
         return np.clip(p, 0, 1)
 
-    if FST == 1:
+    if np.any(FST == 1):
         raise ValueError('`FST` must be strictly less than 1 when `dist="beta"`.')
 
     p = p0.copy()

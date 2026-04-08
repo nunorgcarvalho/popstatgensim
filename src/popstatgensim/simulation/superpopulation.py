@@ -10,6 +10,7 @@ import numpy as np
 
 from ..genome import frequencies as genome_frequencies
 from ..genome import pca as genome_pca
+from ..genome import structure as genome_structure
 from ..pedigree.pedigree import Pedigree
 from ..pedigree import relations as pedigree_relations
 from ..plotting import genome as genome_plotting
@@ -44,6 +45,90 @@ class SuperPopulation:
         self._update_era() # initializes active indices and history
         # creates lineage graph (adjacency matrix) for populations
         self._expand_graph()
+
+    @classmethod
+    def from_FST(cls, n_pops: int, N: Union[int, list, np.ndarray],
+                 FST: Union[float, np.ndarray] = 0,
+                 p0: Union[float, np.ndarray] = None,
+                 **kwargs) -> 'SuperPopulation':
+        '''
+        Initializes a superpopulation by drawing subpopulation allele
+        frequencies from a shared ancestral frequency vector using `FST`.
+        Parameters:
+            n_pops (int): Number of subpopulations to create.
+            N (int or list): Population size of each subpopulation. If a single
+                integer is provided, it is applied to all subpopulations.
+            FST (float or 1D array): Pairwise FST between subpopulations when a
+                scalar is provided. In that case, `FST / 2` is passed to
+                `draw_p_FST()` for every subpopulation. If an array is provided,
+                it must have length `n_pops` and each entry is passed directly
+                to `draw_p_FST()` for the corresponding subpopulation without
+                dividing by 2.
+            p0 (float or array): Starting allele frequencies for the shared
+                ancestral population. If omitted, they are initialized in the
+                same way as `Population.__init__()`.
+            **kwargs: Additional keyword arguments passed to `Population`.
+        Returns:
+            SuperPopulation: Superpopulation containing the simulated
+                subpopulations.
+        '''
+        if n_pops < 1:
+            raise ValueError('`n_pops` must be at least 1.')
+
+        if 'p_init' in kwargs:
+            raise ValueError('Use `p0` with `SuperPopulation.from_FST()` instead of `p_init`.')
+
+        if isinstance(N, (int, np.integer)):
+            N_list = [int(N)] * n_pops
+        else:
+            N_list = [int(n_i) for n_i in N]
+            if len(N_list) != n_pops:
+                raise ValueError('Length of `N` must match `n_pops`.')
+        if any(n_i < 1 for n_i in N_list):
+            raise ValueError('All subpopulation sizes must be positive integers.')
+
+        if p0 is None:
+            if 'M' not in kwargs:
+                raise ValueError('Must provide `M` in `kwargs` when `p0` is not specified.')
+            M = int(kwargs['M'])
+            p0 = genome_structure.draw_p_init(M, method='uniform', params=(0.05, 0.95))
+        elif isinstance(p0, (float, int, np.floating, np.integer)):
+            if 'M' not in kwargs:
+                raise ValueError('Must provide `M` in `kwargs` when `p0` is a scalar.')
+            M = int(kwargs['M'])
+            p0 = np.full(M, float(p0))
+        else:
+            p0 = np.asarray(p0, dtype=float)
+            if p0.ndim != 1:
+                raise ValueError('`p0` must be a scalar or a 1-dimensional array.')
+            M = p0.shape[0]
+            if 'M' in kwargs and int(kwargs['M']) != M:
+                raise ValueError('`M` in `kwargs` must match the length of `p0`.')
+            kwargs['M'] = M
+
+        FST_arr = np.asarray(FST, dtype=float)
+        if FST_arr.ndim == 0:
+            FST_draws = [float(FST_arr) / 2] * n_pops
+        else:
+            if FST_arr.ndim != 1:
+                raise ValueError('`FST` must be a scalar or a 1-dimensional array.')
+            if len(FST_arr) != n_pops:
+                raise ValueError('Array-valued `FST` must have length `n_pops`.')
+            warnings.warn(
+                'Array-valued `FST` is passed directly to draw_p_FST() without '
+                'dividing by 2; interpret these as ancestral-to-subpopulation values.',
+                UserWarning,
+            )
+            FST_draws = FST_arr.tolist()
+
+        pops = []
+        for N_i, FST_i in zip(N_list, FST_draws):
+            p_init = genome_structure.draw_p_FST(FST_i, p0)
+            pops.append(Population(N=N_i, p_init=p_init, **kwargs))
+
+        spop = cls(pops)
+        spop.add_subpop_trait()
+        return spop
     
     def _update_era(self):
         ''' Updates the list of active population indices based on the current state of the `active` attribute, the current era, and the history of active populations (as boolean matrix).'''

@@ -81,6 +81,43 @@ def test_add_popstrat_requires_more_than_one_populated_subpopulation():
         pop.traits["y"].add_popstrat(variance=0.4)
 
 
+def test_superpopulation_from_FST_builds_subpops_and_adds_subpop_trait():
+    p0 = np.linspace(0.1, 0.9, 6)
+    spop = psg.SuperPopulation.from_FST(n_pops=3, N=4, FST=0.2, p0=p0, seed=0)
+
+    assert len(spop.pops) == 3
+    assert spop.active == [True, True, True]
+    for idx, pop in enumerate(spop.pops):
+        assert pop.N == 4
+        assert pop.M == len(p0)
+        assert "subpop" in pop.traits
+        np.testing.assert_array_equal(pop.traits["subpop"].y, np.full(pop.N, idx))
+
+
+def test_superpopulation_from_FST_accepts_per_population_FST_with_warning():
+    p0 = np.linspace(0.2, 0.8, 5)
+    fst = np.array([0.01, 0.05])
+
+    with pytest.warns(UserWarning, match="passed directly to draw_p_FST"):
+        spop = psg.SuperPopulation.from_FST(n_pops=2, N=[3, 4], FST=fst, p0=p0, seed=1)
+
+    assert [pop.N for pop in spop.pops] == [3, 4]
+    for pop in spop.pops:
+        assert pop.M == len(p0)
+
+
+def test_superpopulation_from_FST_checks_per_population_FST_length():
+    p0 = np.linspace(0.2, 0.8, 5)
+
+    with pytest.raises(ValueError, match="length `n_pops`"):
+        psg.SuperPopulation.from_FST(n_pops=3, N=4, FST=np.array([0.01, 0.02]), p0=p0)
+
+
+def test_superpopulation_from_FST_requires_M_when_p0_missing():
+    with pytest.raises(ValueError, match="Must provide `M`"):
+        psg.SuperPopulation.from_FST(n_pops=2, N=3)
+
+
 def test_validate_moves_eps_component_to_the_end():
     pop = psg.Population(N=6, M=4, p_init=0.3, seed=11)
     pop.add_trait(
