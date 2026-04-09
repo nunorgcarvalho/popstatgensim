@@ -257,6 +257,23 @@ class Population:
             return self._G_par_std
         return np.asarray(trait_sampling.get_G_std_for_effects(G_par, P=2 * self.P), dtype=np.float32)
 
+    def get_chrom_idx(self) -> np.ndarray:
+        '''
+        Returns ascending chromosome start indices inferred from recombination rates.
+
+        Chromosome starts are defined as variant positions where ``Population.R``
+        is exactly ``0.5``, with index 0 always included.
+        '''
+        R = np.asarray(self.R, dtype=float)
+        if R.ndim != 1:
+            raise ValueError('Population.R must be a 1D array.')
+        if R.shape[0] != self.M:
+            raise ValueError('Population.R must have length M.')
+
+        chrom_idx = np.flatnonzero(R == 0.5)
+        chrom_idx = np.unique(np.concatenate([np.array([0], dtype=int), chrom_idx]))
+        return np.sort(chrom_idx)
+
 
     ###################################
     #### Storing object attributes ####

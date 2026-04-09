@@ -1,7 +1,7 @@
 """Public package interface for popstatgensim."""
 
 from . import estimation, genome, io, pedigree, plotting, simulation, traits, utils
-from .estimation import run_HEreg, run_REML
+from .estimation import run_EO_AM, run_HEreg, run_REML
 from .genome import PCAResult
 from .io import export_GRM_GCTA, export_trait
 from .simulation import Population, SuperPopulation
@@ -16,6 +16,7 @@ __all__ = [
     "RandomEffect",
     "NoiseEffect",
     "PCAResult",
+    "run_EO_AM",
     "run_HEreg",
     "run_REML",
     "export_GRM_GCTA",
