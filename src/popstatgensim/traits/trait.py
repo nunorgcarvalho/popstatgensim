@@ -10,6 +10,7 @@ import numpy as np
 
 from . import effect_sampling as sampling
 from .effects import Effect, FixedEffect, GeneticEffect, NoiseEffect, RandomEffect
+from .pgs import simulate_pgs_standardized_weights
 
 
 class Trait:
@@ -674,6 +675,88 @@ class Trait:
             return np.nan
 
         return var_a / var_y
+
+    def simulate_PGS_weights(
+        self,
+        R2: float = None,
+        N: int = None,
+        h2_method: str = 'additive_effects',
+        rng: np.random.Generator = None,
+        seed: int = None,
+    ) -> np.ndarray:
+        r'''
+        Simulates estimated standardized polygenic score weights for the additive
+        genetic component.
+
+        The returned weights are defined variant-wise as
+        \hat{\beta}_j = \beta_j + \epsilon_j,
+        where \beta_j is the true standardized additive effect of variant j from
+        ``Trait.effects['A'].effects_standardized`` and
+        \epsilon_j \sim \mathcal{N}(0, V_{\epsilon}).
+
+        Two definitions of V_{\epsilon} are supported, depending on whether the
+        user supplies ``R2`` or ``N`` (mutually exclusive):
+
+        V_{\epsilon} = (h^2 / M) (h^2 / R^2 - 1)
+        V_{\epsilon} = 1 / N
+
+        Here ``h2`` is obtained from ``Trait.get_h2(method=h2_method)``
+        and ``M`` is the number of variants. The R^2-based expression follows
+        from
+
+        R^2 = Corr(\hat{A}, Y)^2 = (V_A)^2 / (V_A + M / N)
+
+        under the assumptions that
+        1. all variants are independent from each other,
+        2. variants are only correlated with phenotype through the additive
+           genetic component (the ``'A'`` component),
+        3. estimation noise is independent of the variant.
+
+        Reference
+        ---------
+        Daetwyler et al. 2008, PLoS ONE.
+
+        Parameters
+        ----------
+        R2 : float, optional
+            Expected prediction R^2 of the polygenic score. Mutually exclusive
+            with N.
+        N : int, optional
+            GWAS sample size used in the large-sample approximation
+            V_{\epsilon} = 1 / N. Mutually exclusive with R2.
+        h2_method : str, optional
+            Method passed through to ``Trait.get_h2(method=...)`` when obtaining
+            the heritability used in the noise-variance formula. Default is
+            ``'additive_effects'``.
+        rng : np.random.Generator, optional
+            Random number generator used to draw estimation noise.
+        seed : int, optional
+            Seed used to initialize a new random generator when rng is not
+            provided.
+
+        Returns
+        -------
+        np.ndarray
+            Estimated standardized PGS weights of length M.
+        '''
+        if 'A' not in self.effects:
+            raise ValueError("Trait must contain an additive genetic effect 'A'.")
+
+        beta = self.effects['A'].effects_standardized
+        if beta is None:
+            raise ValueError(
+                "Trait.effects['A'] must have standardized additive effects stored."
+            )
+
+        h2 = self.get_h2(method=h2_method)
+        return simulate_pgs_standardized_weights(
+            beta=beta,
+            h2=h2,
+            R2=R2,
+            N=N,
+            rng=rng,
+            seed=seed,
+        )
 
     def get_components_matrix(self, exclude = None, include_y = True) -> np.ndarray:
         '''

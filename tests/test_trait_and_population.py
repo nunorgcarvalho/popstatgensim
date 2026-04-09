@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 
 import popstatgensim as psg
-from popstatgensim.traits import FixedEffect, GeneticEffect, RandomEffect
+from popstatgensim.traits import (
+    FixedEffect,
+    GeneticEffect,
+    RandomEffect,
+    simulate_pgs_standardized_weights,
+)
 
 
 def test_population_trait_can_reference_existing_population_trait():
@@ -228,3 +233,61 @@ def test_remove_effect_validates_trait_state():
 
     assert list(trait.y_.keys()) == ["Eps"]
     assert np.allclose(trait.y, trait.y_["Eps"])
+
+
+def test_simulate_pgs_standardized_weights_uses_r2_formula():
+    beta = np.array([0.2, -0.1, 0.0, 0.3], dtype=float)
+    h2 = 0.35
+    r2 = 0.2
+    seed = 123
+
+    observed = simulate_pgs_standardized_weights(beta=beta, h2=h2, R2=r2, seed=seed)
+
+    v_eps = (h2 / beta.size) * ((h2 / r2) - 1.0)
+    expected = beta + np.random.default_rng(seed).normal(0.0, np.sqrt(v_eps), size=beta.size)
+    np.testing.assert_allclose(observed, expected)
+
+
+def test_simulate_pgs_standardized_weights_uses_n_formula():
+    beta = np.array([0.2, -0.1, 0.0, 0.3], dtype=float)
+    h2 = 0.35
+    n = 5000
+    seed = 456
+
+    observed = simulate_pgs_standardized_weights(beta=beta, h2=h2, N=n, seed=seed)
+
+    expected = beta + np.random.default_rng(seed).normal(0.0, np.sqrt(1.0 / n), size=beta.size)
+    np.testing.assert_allclose(observed, expected)
+
+
+def test_simulate_pgs_standardized_weights_requires_exactly_one_of_r2_or_n():
+    beta = np.array([0.1, 0.2], dtype=float)
+
+    with pytest.raises(ValueError, match="exactly one of R2 or N"):
+        simulate_pgs_standardized_weights(beta=beta, h2=0.2)
+
+    with pytest.raises(ValueError, match="exactly one of R2 or N"):
+        simulate_pgs_standardized_weights(beta=beta, h2=0.2, R2=0.1, N=1000)
+
+
+def test_simulate_pgs_standardized_weights_rejects_r2_above_h2():
+    beta = np.array([0.1, 0.2], dtype=float)
+
+    with pytest.raises(ValueError, match="less than or equal to h2"):
+        simulate_pgs_standardized_weights(beta=beta, h2=0.2, R2=0.3, seed=0)
+
+
+def test_trait_simulate_pgs_weights_wraps_additive_effects():
+    pop = psg.Population(N=10, M=5, p_init=0.35, seed=8)
+    effect = GeneticEffect(var_indep=0.4, M=pop.M, M_causal=5, name="A")
+    pop.add_trait(name="y", effects={"A": effect}, var_Eps=0.6)
+
+    trait = pop.traits["y"]
+    beta = trait.effects["A"].effects_standardized.copy()
+    h2 = trait.get_h2(method="additive_effects")
+    seed = 789
+
+    observed = trait.simulate_PGS_weights(R2=0.1, seed=seed)
+    expected = simulate_pgs_standardized_weights(beta=beta, h2=h2, R2=0.1, seed=seed)
+
+    np.testing.assert_allclose(observed, expected)
