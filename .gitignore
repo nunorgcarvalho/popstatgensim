@@ -8,3 +8,5 @@ dist/
 *.egg-info/
 *.so
 *.o
+notebooks/benchmark_REML_04-10/cache/
+notebooks/benchmark_REML_04-10/results/
