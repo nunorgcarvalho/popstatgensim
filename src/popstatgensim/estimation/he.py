@@ -168,7 +168,8 @@ def run_HEreg(
         iterations=1,
         converged=True,
         method="HE",
-        safety_checks=False,
+        safety_checks_enabled=False,
+        strict_safety_checks=False,
     )
     if prepared.X_model is not None:
         out["fixed_effects"]["est"] = beta_full

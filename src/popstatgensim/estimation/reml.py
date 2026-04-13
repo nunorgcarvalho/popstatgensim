@@ -42,6 +42,26 @@ class _PreparedInputs:
     n_random: int
 
 
+@dataclass(frozen=True)
+class _UncheckedSafetyMonitor:
+    """Cheap guardrails used before enabling the full PSD line search."""
+    phenotype_variance: float
+    variance_cap_multiplier: float = 5.0
+    step_cap_multiplier: float = 5.0
+    residual_floor_multiplier: float = 5.0
+
+
+class _SafetyTrigger(RuntimeError):
+    """Internal signal that an unchecked REML run should be retried more safely."""
+
+    def __init__(self, method: str, reason: str, iteration: int | None = None):
+        self.method = method
+        self.reason = reason
+        self.iteration = iteration
+        iteration_msg = "" if iteration is None else f" at iteration {iteration}"
+        super().__init__(f"{method}{iteration_msg}: {reason}")
+
+
 def _as_optional_matrix_list(
     matrices: Sequence[np.ndarray | None] | np.ndarray | None,
     name: str,
@@ -436,6 +456,74 @@ def _line_search_update(
     return candidate, np.zeros_like(theta), False
 
 
+def _unchecked_state_issue(
+    theta: np.ndarray,
+    offsets: np.ndarray,
+    monitor: _UncheckedSafetyMonitor | None,
+) -> str | None:
+    """Return a cheap warning signal for an unchecked REML iterate."""
+    if monitor is None:
+        return None
+
+    theta = np.asarray(theta, dtype=float)
+    offsets = np.asarray(offsets, dtype=float)
+    if not np.isfinite(theta).all():
+        return "non-finite variance component estimate"
+    if not np.isfinite(offsets).all():
+        return "non-finite REML update"
+
+    scale = max(abs(float(monitor.phenotype_variance)), _TINY)
+    max_abs_theta = float(np.max(np.abs(theta)))
+    if max_abs_theta > monitor.variance_cap_multiplier * scale:
+        return (
+            f"variance component magnitude {max_abs_theta:.4g} exceeded "
+            f"{monitor.variance_cap_multiplier:g}x the phenotype variance"
+        )
+
+    max_abs_offset = float(np.max(np.abs(offsets)))
+    if max_abs_offset > monitor.step_cap_multiplier * scale:
+        return (
+            f"REML step magnitude {max_abs_offset:.4g} exceeded "
+            f"{monitor.step_cap_multiplier:g}x the phenotype variance"
+        )
+
+    if theta[-1] < -monitor.residual_floor_multiplier * scale:
+        return (
+            f"residual variance {theta[-1]:.4g} dropped below "
+            f"-{monitor.residual_floor_multiplier:g}x the phenotype variance"
+        )
+
+    return None
+
+
+def _raise_if_unchecked_state_unstable(
+    *,
+    method: str,
+    iteration: int,
+    theta: np.ndarray,
+    offsets: np.ndarray,
+    monitor: _UncheckedSafetyMonitor | None,
+) -> None:
+    """Escalate cheap unchecked-run warnings into a strict-safety restart."""
+    issue = _unchecked_state_issue(theta, offsets, monitor)
+    if issue is not None:
+        raise _SafetyTrigger(method=method, reason=issue, iteration=iteration)
+
+
+def _result_issue(
+    out: dict,
+    monitor: _UncheckedSafetyMonitor | None,
+) -> str | None:
+    """Check whether a completed REML fit still looks unstable or implausible."""
+    theta = np.asarray(out["var_comps"]["est"], dtype=float)
+    issue = _unchecked_state_issue(theta, np.zeros_like(theta), monitor)
+    if issue is not None:
+        return issue
+    if not out["algorithm"]["converged"]:
+        return f"did not converge within {out['algorithm']['iterations']} iterations"
+    return None
+
+
 def _stochastic_component_ops(
     Vs_work: list[np.ndarray],
     Py: np.ndarray,
@@ -533,7 +621,8 @@ def _finalise_output(
     iterations: int,
     converged: bool,
     method: str,
-    safety_checks: bool,
+    safety_checks_enabled: bool,
+    strict_safety_checks: bool,
 ) -> dict:
     """Package common outputs and derived summary quantities into the public result dict."""
     theta = np.asarray(theta, dtype=float)
@@ -588,7 +677,8 @@ def _finalise_output(
             "method": method,
             "iterations": iterations,
             "converged": converged,
-            "safety_checks": safety_checks,
+            "safety_checks": safety_checks_enabled,
+            "strict_safety_checks": strict_safety_checks,
         },
         "log_likelihood": log_likelihood,
     }
@@ -609,6 +699,8 @@ def _run_ai_stochastic(
     dtype: np.dtype,
     phenotype_variance: float,
     safety_checks: bool,
+    safety_checks_enabled: bool,
+    monitor: _UncheckedSafetyMonitor | None,
 ) -> dict:
     """Run AI-REML using Hutchinson trace estimation."""
     n = y.shape[0]
@@ -659,6 +751,12 @@ def _run_ai_stochastic(
             try:
                 Lc = cho_factor(V, lower=True, overwrite_a=True, check_finite=False)
             except linalg.LinAlgError:
+                if monitor is not None:
+                    raise _SafetyTrigger(
+                        method="AI_stochastic",
+                        reason="non-positive-definite covariance encountered before the update",
+                        iteration=iteration + 1,
+                    )
                 theta *= 1.05
                 continue
 
@@ -713,6 +811,13 @@ def _run_ai_stochastic(
                 )
         else:
             theta, offsets = _legacy_newton_step(AI, grad, theta, constrain=constrain)
+            _raise_if_unchecked_state_unstable(
+                method="AI_stochastic",
+                iteration=iteration + 1,
+                theta=theta,
+                offsets=offsets,
+                monitor=monitor,
+            )
         _print_iter_message(theta, offsets, iteration, verbose)
 
         if np.max(np.abs(offsets)) < tol and iteration >= 3:
@@ -730,7 +835,16 @@ def _run_ai_stochastic(
         _, Lc_final = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
     else:
         V_final = _build_v(Vs, theta)
-        Lc_final = cho_factor(V_final, lower=True, check_finite=False)
+        try:
+            Lc_final = cho_factor(V_final, lower=True, check_finite=False)
+        except linalg.LinAlgError as exc:
+            if monitor is not None:
+                raise _SafetyTrigger(
+                    method="AI_stochastic",
+                    reason="final covariance was not positive definite",
+                    iteration=iterations,
+                ) from exc
+            raise
     beta_last, _, _, _ = _compute_beta_and_py(Lc_final, y, X_model)
     ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc_final)
     vcov = np.linalg.pinv(AI_last + 1e-12 * np.eye(m + 1))
@@ -747,7 +861,8 @@ def _run_ai_stochastic(
         iterations=iterations,
         converged=converged,
         method="AI_stochastic",
-        safety_checks=safety_checks,
+        safety_checks_enabled=safety_checks_enabled,
+        strict_safety_checks=safety_checks,
     )
 
 
@@ -763,6 +878,8 @@ def _run_ai_exact(
     verbose: int,
     phenotype_variance: float,
     safety_checks: bool,
+    safety_checks_enabled: bool,
+    monitor: _UncheckedSafetyMonitor | None,
 ) -> dict:
     """Run AI-REML with exact traces and an explicit projection matrix."""
     m = len(Vs)
@@ -790,7 +907,13 @@ def _run_ai_exact(
             V = _build_v(Vs, theta)
             try:
                 Lc = cho_factor(V, lower=True, overwrite_a=False, check_finite=False)
-            except linalg.LinAlgError:
+            except linalg.LinAlgError as exc:
+                if monitor is not None:
+                    raise _SafetyTrigger(
+                        method="AI",
+                        reason="non-positive-definite covariance encountered before the update",
+                        iteration=iteration + 1,
+                    ) from exc
                 theta *= 1.05
                 continue
 
@@ -822,6 +945,13 @@ def _run_ai_exact(
                 raise linalg.LinAlgError("AI could not find a positive-definite REML update.")
         else:
             theta, offsets = _legacy_newton_step(AI, grad, theta, constrain=constrain)
+            _raise_if_unchecked_state_unstable(
+                method="AI",
+                iteration=iteration + 1,
+                theta=theta,
+                offsets=offsets,
+                monitor=monitor,
+            )
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -848,7 +978,8 @@ def _run_ai_exact(
         iterations=iterations,
         converged=converged,
         method="AI",
-        safety_checks=safety_checks,
+        safety_checks_enabled=safety_checks_enabled,
+        strict_safety_checks=safety_checks,
     )
 
 
@@ -864,6 +995,8 @@ def _run_reml_em(
     verbose: int,
     phenotype_variance: float,
     safety_checks: bool,
+    safety_checks_enabled: bool,
+    monitor: _UncheckedSafetyMonitor | None,
 ) -> dict:
     """Run EM-REML with exact traces and exact projection matrices."""
     m = len(Vs)
@@ -887,7 +1020,16 @@ def _run_reml_em(
             _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
         else:
             V = _build_v(Vs, theta)
-            Lc = cho_factor(V, lower=True, check_finite=False)
+            try:
+                Lc = cho_factor(V, lower=True, check_finite=False)
+            except linalg.LinAlgError as exc:
+                if monitor is not None:
+                    raise _SafetyTrigger(
+                        method="EM",
+                        reason="non-positive-definite covariance encountered before the update",
+                        iteration=iteration + 1,
+                    ) from exc
+                raise
         beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
         P = _get_projection_matrix(Vinv, X_model)
@@ -910,6 +1052,13 @@ def _run_reml_em(
             theta = theta + offsets
             if constrain:
                 theta = np.maximum(theta, tol / 10)
+            _raise_if_unchecked_state_unstable(
+                method="EM",
+                iteration=iteration + 1,
+                theta=theta,
+                offsets=offsets,
+                monitor=monitor,
+            )
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -943,7 +1092,8 @@ def _run_reml_em(
         iterations=iterations,
         converged=converged,
         method="EM",
-        safety_checks=safety_checks,
+        safety_checks_enabled=safety_checks_enabled,
+        strict_safety_checks=safety_checks,
     )
 
 
@@ -960,6 +1110,8 @@ def _run_reml_quad_exact(
     verbose: int,
     phenotype_variance: float,
     safety_checks: bool,
+    safety_checks_enabled: bool,
+    monitor: _UncheckedSafetyMonitor | None,
 ) -> dict:
     """Run the exact quadratic REML methods: NR, FS, or AI."""
     m = len(Vs)
@@ -983,7 +1135,16 @@ def _run_reml_quad_exact(
             _, Lc = _factor_theta(Vs, theta, dtype=float, overwrite_a=False)
         else:
             V = _build_v(Vs, theta)
-            Lc = cho_factor(V, lower=True, check_finite=False)
+            try:
+                Lc = cho_factor(V, lower=True, check_finite=False)
+            except linalg.LinAlgError as exc:
+                if monitor is not None:
+                    raise _SafetyTrigger(
+                        method=method,
+                        reason="non-positive-definite covariance encountered before the update",
+                        iteration=iteration + 1,
+                    ) from exc
+                raise
         beta_last, _, _, _ = _compute_beta_and_py(Lc, y, X_model)
         Vinv = cho_solve(Lc, np.eye(y.shape[0]), check_finite=False)
         P = _get_projection_matrix(Vinv, X_model)
@@ -1028,6 +1189,13 @@ def _run_reml_quad_exact(
             theta = theta + offsets
             if constrain:
                 theta = np.maximum(theta, tol / 10)
+            _raise_if_unchecked_state_unstable(
+                method=method,
+                iteration=iteration + 1,
+                theta=theta,
+                offsets=offsets,
+                monitor=monitor,
+            )
         _print_iter_message(theta, offsets, iteration, verbose)
         ll_last = _compute_loglik(y=y, X=X_model, beta=beta_last, Lc=Lc)
 
@@ -1054,7 +1222,8 @@ def _run_reml_quad_exact(
         iterations=iterations,
         converged=converged,
         method=method,
-        safety_checks=safety_checks,
+        safety_checks_enabled=safety_checks_enabled,
+        strict_safety_checks=safety_checks,
     )
 
 
@@ -1128,10 +1297,12 @@ def run_REML(
         Working precision for the stochastic AI solver. Ignored by the exact
         methods.
     safety_checks : bool, default True
-        If True, keep REML updates inside the positive-definite covariance
-        region and allow automatic fallback to stabler methods when the
-        requested optimizer fails or does not converge. If False, use the
-        older faster-but-riskier update path without those safeguards.
+        If True, start with the fast unchecked REML updates, but monitor them
+        cheaply for numerical trouble. Full positive-definite step checks are
+        only enabled if the unchecked run hits a linear-algebra failure,
+        returns implausibly large variance components, or fails to converge.
+        If False, use the older faster-but-riskier update path without those
+        safeguards or fallback retries.
     Returns
     -------
     dict
@@ -1140,10 +1311,11 @@ def run_REML(
         ``var_y`` containing ``before_FE``, ``after_FE``, ``sum_comp``, and
         ``sum_comp_se``; ``fixed_effects`` containing ``est``, ``se``, and
         ``vcov``; ``algorithm`` containing ``method``, ``iterations``, and
-        ``converged`` (plus ``safety_checks`` and ``requested_method`` if a
-        fallback was used); and ``log_likelihood``. If fixed effects are
-        supplied, the first entry in ``fixed_effects['est']`` is the
-        intercept, followed by the user-supplied covariates.
+        ``converged`` (plus ``safety_checks``, ``strict_safety_checks``, and
+        ``requested_method`` when applicable); and ``log_likelihood``. If
+        fixed effects are supplied, the first entry in
+        ``fixed_effects['est']`` is the intercept, followed by the
+        user-supplied covariates.
     """
     if method not in {"AI_stochastic", "AI", "EM", "NR", "FS"}:
         raise ValueError("`method` must be one of 'AI_stochastic', 'AI', 'EM', 'NR', or 'FS'.")
@@ -1184,7 +1356,10 @@ def run_REML(
             raise ValueError("Initial random-effect variances exceed the phenotype variance.")
         init_theta = np.concatenate([init, [resid_init]])
 
-    def _dispatch(method_i: str) -> dict:
+    monitor = _UncheckedSafetyMonitor(phenotype_variance=prepared.phenotype_variance)
+
+    def _dispatch(method_i: str, *, strict_safety_checks: bool) -> dict:
+        monitor_i = None if strict_safety_checks or not safety_checks else monitor
         if method_i == "AI_stochastic":
             return _run_ai_stochastic(
                 y=prepared.y,
@@ -1200,7 +1375,9 @@ def run_REML(
                 n_probes=n_probes,
                 dtype=dtype,
                 phenotype_variance=prepared.phenotype_variance,
-                safety_checks=safety_checks,
+                safety_checks=strict_safety_checks,
+                safety_checks_enabled=safety_checks,
+                monitor=monitor_i,
             )
         if method_i == "AI":
             return _run_ai_exact(
@@ -1214,7 +1391,9 @@ def run_REML(
                 constrain=constrain,
                 verbose=verbose,
                 phenotype_variance=prepared.phenotype_variance,
-                safety_checks=safety_checks,
+                safety_checks=strict_safety_checks,
+                safety_checks_enabled=safety_checks,
+                monitor=monitor_i,
             )
         if method_i == "EM":
             return _run_reml_em(
@@ -1228,7 +1407,9 @@ def run_REML(
                 constrain=constrain,
                 verbose=verbose,
                 phenotype_variance=prepared.phenotype_variance,
-                safety_checks=safety_checks,
+                safety_checks=strict_safety_checks,
+                safety_checks_enabled=safety_checks,
+                monitor=monitor_i,
             )
         return _run_reml_quad_exact(
             y=prepared.y,
@@ -1242,7 +1423,9 @@ def run_REML(
             constrain=constrain,
             verbose=verbose,
             phenotype_variance=prepared.phenotype_variance,
-            safety_checks=safety_checks,
+            safety_checks=strict_safety_checks,
+            safety_checks_enabled=safety_checks,
+            monitor=monitor_i,
         )
 
     fallback_order = {
@@ -1255,28 +1438,83 @@ def run_REML(
     attempts = [method] + (fallback_order[method] if safety_checks else [])
 
     for i, method_i in enumerate(attempts):
+        if not safety_checks:
+            out = _dispatch(method_i, strict_safety_checks=False)
+            if method_i != method:
+                out["algorithm"]["requested_method"] = method
+            return out
+
+        strict_reason = None
+        warned_strict_restart = False
         try:
-            out = _dispatch(method_i)
+            out = _dispatch(method_i, strict_safety_checks=False)
+            strict_reason = _result_issue(out, monitor)
+            if strict_reason is None:
+                if method_i != method:
+                    out["algorithm"]["requested_method"] = method
+                return out
+        except _SafetyTrigger as exc:
+            strict_reason = exc.reason
+            warnings.warn(
+                f"Unchecked REML method '{method_i}' tripped a safety trigger ({strict_reason}); "
+                "restarting with per-iteration PSD checks.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            warned_strict_restart = True
+        except linalg.LinAlgError as exc:
+            strict_reason = str(exc)
+            warnings.warn(
+                f"Unchecked REML method '{method_i}' hit a linear-algebra failure; "
+                "restarting with per-iteration PSD checks.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            warned_strict_restart = True
+
+        if strict_reason is not None and not warned_strict_restart:
+            warnings.warn(
+                f"Unchecked REML method '{method_i}' returned an unstable fit ({strict_reason}); "
+                "restarting with per-iteration PSD checks.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        try:
+            out = _dispatch(method_i, strict_safety_checks=True)
         except linalg.LinAlgError as exc:
             if i == len(attempts) - 1:
                 raise
             next_method = attempts[i + 1]
             warnings.warn(
-                f"REML method '{method_i}' hit a non-positive-definite covariance; "
-                f"retrying with '{next_method}'.",
+                f"Strict REML method '{method_i}' still failed ({exc}); retrying with '{next_method}'.",
                 RuntimeWarning,
                 stacklevel=2,
             )
             continue
 
-        if out["algorithm"]["converged"] or i == len(attempts) - 1:
+        strict_issue = _result_issue(out, monitor)
+        if strict_issue is None:
+            if strict_reason is not None:
+                out["algorithm"]["safety_trigger"] = strict_reason
             if method_i != method:
                 out["algorithm"]["requested_method"] = method
             return out
 
+        out["algorithm"]["safety_trigger"] = strict_issue
+        if i == len(attempts) - 1:
+            if method_i != method:
+                out["algorithm"]["requested_method"] = method
+            warnings.warn(
+                f"Strict REML method '{method_i}' still looks unstable ({strict_issue}); returning the last fit.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return out
+
         next_method = attempts[i + 1]
         warnings.warn(
-            f"REML method '{method_i}' did not converge within {max_iter} iterations; "
+            f"Strict REML method '{method_i}' still looks unstable ({strict_issue}); "
             f"retrying with '{next_method}'.",
             RuntimeWarning,
             stacklevel=2,
