@@ -892,6 +892,22 @@ class Population:
                 'Assortative mating can only be simulated if traits are updated for each generation. '
                 'Set trait_updates=True when passing AM-related arguments.'
             )
+        if generations > 1 and not trait_updates:
+            traits_requiring_updates = {
+                trait_name: trait.required_per_generation_update_effects()
+                for trait_name, trait in self.traits.items()
+                if trait.type == 'composite' and trait.requires_per_generation_updates()
+            }
+            if traits_requiring_updates:
+                trait_labels = ', '.join(
+                    f"{trait_name}({', '.join(effect_names)})"
+                    for trait_name, effect_names in traits_requiring_updates.items()
+                )
+                raise ValueError(
+                    'Some traits require per-generation updates during multi-generation simulation, '
+                    f'but trait_updates=False: {trait_labels}. '
+                    'Set trait_updates=True.'
+                )
         if self.metric_retention == 'store_last_k' and (self.metric_last_k is None or self.metric_last_k <= 0):
             raise ValueError("metric_last_k must be a positive integer when metric_retention='store_last_k'.")
 

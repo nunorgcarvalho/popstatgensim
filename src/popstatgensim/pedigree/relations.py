@@ -26,6 +26,65 @@ def initialize_relations(N: int, N1: int = None, parent_source: str = 'past'):
     }
     return relations
 
+def apply_relation_to_values(relations: dict, relation: str, values: np.ndarray, N: int,
+                             reduce: str = 'mean') -> np.ndarray:
+    '''
+    Applies one compact relation mapping to a 1D source-value vector.
+    Parameters:
+        relations (dict): Dictionary returned by `initialize_relations()` or an equivalent
+            compact relation mapping.
+        relation (str): Relation to apply. Supported values are 'self' and 'parents'.
+        values (1D array): Source values indexed by the rows referenced by `relation`.
+            For `relation='self'`, this must have length `N`. For `relation='parents'`,
+            this must have length `relations['parent_N']`.
+        N (int): Number of individuals in the focal population.
+        reduce (str): How to combine multiple relatives for one focal individual.
+            Supported values are 'mean' and 'sum'. For `relation='self'`, this is ignored.
+    Returns:
+        transformed_values (1D array): Relation-transformed values for the focal population.
+    '''
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError('values must be a 1D array.')
+
+    if relation in {None, 'self'}:
+        if values.shape[0] != N:
+            raise ValueError(f"Self relation requires a length-{N} value vector.")
+        return values.copy()
+
+    if reduce not in {'mean', 'sum'}:
+        raise ValueError("reduce must be either 'mean' or 'sum'.")
+
+    if relation == 'parents':
+        parent_ids = np.asarray(relations['parents'], dtype=np.int32)
+        if parent_ids.ndim != 2 or parent_ids.shape != (N, 2):
+            raise ValueError("Compact 'parents' relation must have shape (N, 2).")
+
+        parent_N = int(relations.get('parent_N', N))
+        if values.shape[0] != parent_N:
+            raise ValueError(
+                f"Parent relation requires a length-{parent_N} source vector, got length {values.shape[0]}."
+            )
+
+        transformed = np.zeros(N, dtype=float)
+        valid_mask = parent_ids >= 0
+        if not np.any(valid_mask):
+            return transformed
+
+        parent_values = np.zeros((N, 2), dtype=float)
+        parent_values[valid_mask] = values[parent_ids[valid_mask]]
+        transformed = parent_values.sum(axis=1)
+
+        if reduce == 'sum':
+            return transformed
+
+        counts = valid_mask.sum(axis=1)
+        nonzero = counts > 0
+        transformed[nonzero] /= counts[nonzero]
+        return transformed
+
+    raise ValueError(f"Unsupported relation '{relation}'.")
+
 def get_relation_matrix(relations: dict, relation: str, N: int,
                         dtype: np.dtype = np.uint8) -> np.ndarray:
     '''

@@ -20,12 +20,160 @@ def test_population_trait_can_reference_existing_population_trait():
             name="base_copy",
             beta=2.0,
             input_name="base",
-            is_trait=True,
         )
     }
     pop.add_trait(name="y", effects=effects)
 
     np.testing.assert_allclose(pop.traits["y"].y, 2.0 * base_values)
+
+
+def test_fixed_effect_raises_when_input_name_is_ambiguous_between_trait_and_input():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=31)
+    pop.add_trait_from_fixed_values(name="base", y=np.arange(pop.N, dtype=float))
+
+    with pytest.raises(ValueError, match="Set is_trait explicitly"):
+        pop.add_trait(
+            name="y",
+            effects={"base_copy": FixedEffect(name="base_copy", beta=1.0, input_name="base")},
+            inputs={"base": np.ones(pop.N, dtype=float)},
+        )
+
+
+def test_fixed_effect_can_use_parent_mean_of_same_trait_from_previous_generation():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=32, keep_past_generations=1)
+    base_values = np.linspace(-1.0, 1.0, pop.N)
+    pop.add_trait_from_fixed_values(name="y", y=base_values, trait_type="permanent")
+    pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
+
+    pop.add_trait(
+        name="z",
+        effects={
+            "PT": FixedEffect(
+                name="PT",
+                beta=2.0,
+                input_name="y",
+                relation="parents",
+                reduce="mean",
+            )
+        },
+    )
+
+    parent_ids = pop.relations["parents"]
+    expected = 2.0 * base_values[parent_ids].mean(axis=1)
+    np.testing.assert_allclose(pop.traits["z"].y, expected)
+
+
+def test_fixed_effect_parent_trait_uses_zeros_when_past_generation_is_unavailable():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=320)
+    pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
+
+    with pytest.warns(UserWarning, match="Using zeros for this component"):
+        pop.add_trait(
+            name="z",
+            effects={
+                "PT": FixedEffect(
+                    name="PT",
+                    var=1.5,
+                    input_name="y",
+                    relation="parents",
+                    reduce="mean",
+                )
+            },
+        )
+
+    np.testing.assert_allclose(pop.traits["z"].y, np.zeros(pop.N))
+
+
+def test_fixed_effect_can_use_parent_component_and_var_scaling():
+    pop = psg.Population(N=6, M=5, p_init=0.3, seed=33, keep_past_generations=1)
+    x = np.linspace(0.0, 1.0, pop.N)
+    pop.add_trait(
+        name="base",
+        effects={"base_component": FixedEffect(name="base_component", beta=1.0, input_name="x")},
+        inputs={"x": x},
+        var_Eps=0.2,
+    )
+    parent_component = pop.traits["base"].y_["base_component"].copy()
+
+    pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
+    pop.add_trait(
+        name="child",
+        effects={
+            "PT": FixedEffect(
+                name="PT",
+                var=1.5,
+                input_name="base",
+                input_component="base_component",
+                relation="parents",
+                reduce="sum",
+            )
+        },
+    )
+
+    parent_ids = pop.relations["parents"]
+    raw = parent_component[parent_ids].sum(axis=1)
+    expected = raw * np.sqrt(1.5 / raw.var())
+    np.testing.assert_allclose(pop.traits["child"].y, expected)
+
+
+def test_trait_reports_when_effect_requires_per_generation_updates():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=333)
+    pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
+    pop.add_trait(
+        name="z",
+        effects={
+            "PT": FixedEffect(
+                name="PT",
+                beta=1.0,
+                input_name="y",
+                relation="parents",
+                reduce="mean",
+            )
+        },
+    )
+
+    assert pop.traits["z"].requires_per_generation_updates() is True
+    assert pop.traits["z"].required_per_generation_update_effects() == ["PT"]
+
+
+def test_multigeneration_simulation_requires_trait_updates_for_parent_phenotype_effects():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=334, keep_past_generations=1)
+    pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
+    pop.add_trait(
+        name="z",
+        effects={
+            "PT": FixedEffect(
+                name="PT",
+                beta=1.0,
+                input_name="y",
+                relation="parents",
+                reduce="mean",
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="require per-generation updates"):
+        pop.simulate_generations(generations=2, related_offspring=True, trait_updates=False)
+
+
+def test_multigeneration_simulation_allows_trait_updates_for_parent_phenotype_effects():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=335, keep_past_generations=1)
+    pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
+    pop.add_trait(
+        name="z",
+        effects={
+            "PT": FixedEffect(
+                name="PT",
+                beta=1.0,
+                input_name="y",
+                relation="parents",
+                reduce="mean",
+            )
+        },
+    )
+
+    pop.simulate_generations(generations=2, related_offspring=True, trait_updates=True)
+    assert pop.traits["z"].y.shape == (pop.N,)
 
 
 def test_population_trait_with_genetic_effect_runs_through_refactored_modules():

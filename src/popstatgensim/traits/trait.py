@@ -95,7 +95,11 @@ class Trait:
 
         fixed_input_names = {
             effect.input_name for effect in self.effects.values()
-            if isinstance(effect, FixedEffect) and not effect.is_trait
+            if (
+                isinstance(effect, FixedEffect)
+                and effect.relation == 'self'
+                and effect.uses_external_input(inputs=self.inputs, pop=self.pop)
+            )
         }
         for input_name in fixed_input_names:
             if input_name not in self.inputs:
@@ -189,18 +193,43 @@ class Trait:
                 if input_name not in self.inputs:
                     raise ValueError(f"Missing required trait input '{input_name}' for effect {name}.")
 
-            if isinstance(effect, FixedEffect) and effect.is_trait and self.pop is not None:
-                if effect.input_name not in self.pop.traits:
+            if isinstance(effect, FixedEffect):
+                is_trait = effect._infer_is_trait(inputs=self.inputs, pop=self.pop, require_resolution=False)
+                if effect.relation != 'self' and not is_trait:
                     raise ValueError(
-                        f"Trait-backed fixed effect '{name}' requires population trait "
-                        f"'{effect.input_name}', but it was not found."
+                        f"Relation-backed fixed effect '{name}' currently requires a trait-backed source."
                     )
-                if current_name in trait_names:
-                    if trait_names.index(effect.input_name) >= trait_names.index(current_name):
+
+                if is_trait and self.pop is not None:
+                    if effect._missing_past_source_population(pop=self.pop):
+                        continue
+                    source_pop = effect._get_source_population(
+                        pop=self.pop,
+                        current_trait_name=current_name,
+                    )
+                    if effect.input_name not in source_pop.traits:
                         raise ValueError(
-                            f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
-                            f"must depend on an earlier trait; got '{effect.input_name}'."
+                            f"Trait-backed fixed effect '{name}' requires source trait "
+                            f"'{effect.input_name}', but it was not found."
                         )
+                    if effect.input_component is not None:
+                        source_trait = source_pop.traits[effect.input_name]
+                        if effect.input_component not in source_trait.y_:
+                            raise ValueError(
+                                f"Trait-backed fixed effect '{name}' requires component "
+                                f"'{effect.input_component}' in trait '{effect.input_name}', but it was not found."
+                            )
+                    if source_pop is self.pop and current_name in trait_names:
+                        if effect.input_name == current_name:
+                            raise ValueError(
+                                f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
+                                'cannot depend on the same current-generation trait values.'
+                            )
+                        if trait_names.index(effect.input_name) >= trait_names.index(current_name):
+                            raise ValueError(
+                                f"Trait-backed fixed effect '{name}' in trait '{current_name}' "
+                                f"must depend on an earlier trait; got '{effect.input_name}'."
+                            )
 
             if isinstance(effect, RandomEffect):
                 if effect.has_dynamic_definition() and self.pop is None:
@@ -339,6 +368,24 @@ class Trait:
             if name not in self.y_:
                 raise ValueError(f'Missing realized component for effect {name}.')
 
+    def required_per_generation_update_effects(self) -> list[str]:
+        '''
+        Returns effect names that require per-generation trait updates during
+        forward simulation to remain internally consistent.
+        '''
+        required = []
+        for name, effect in self.effects.items():
+            if effect.requires_per_generation_trait_updates(inputs=self.inputs, pop=self.pop):
+                required.append(name)
+        return required
+
+    def requires_per_generation_updates(self) -> bool:
+        '''
+        Whether this trait contains any effects that require per-generation
+        trait updates during forward simulation.
+        '''
+        return len(self.required_per_generation_update_effects()) > 0
+
 
     @classmethod
     def from_fixed_values(cls, y: np.ndarray, trait_type: str = 'fixed',
@@ -377,6 +424,7 @@ class Trait:
         self.y_ = {}
         total = None
         self.inputs['_trait_components'] = self.y_
+        self.inputs['_current_trait_name'] = self.name
         try:
             for name, effect in self.effects.items():
                 effect.refresh_from_inputs(self.inputs)
@@ -388,6 +436,7 @@ class Trait:
                     total += values
         finally:
             self.inputs.pop('_trait_components', None)
+            self.inputs.pop('_current_trait_name', None)
 
         self.y = np.zeros(int(self.inputs['N']), dtype=float) if total is None else total
         self.type = 'composite'
@@ -867,6 +916,7 @@ class Trait:
         trait_new.y_ = {}
         total = None
         trait_new.inputs['_trait_components'] = trait_new.y_
+        trait_new.inputs['_current_trait_name'] = trait_new.name
         try:
             for name, effect in trait_new.effects.items():
                 if isinstance(effect, NoiseEffect):
@@ -886,6 +936,7 @@ class Trait:
                     total += values
         finally:
             trait_new.inputs.pop('_trait_components', None)
+            trait_new.inputs.pop('_current_trait_name', None)
 
         trait_new.y = np.zeros(int(trait_new.inputs['N']), dtype=float) if total is None else total
         trait_new._update_empirical_variances()

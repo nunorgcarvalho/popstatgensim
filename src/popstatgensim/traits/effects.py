@@ -10,6 +10,7 @@ import numpy as np
 
 from . import effect_sampling as sampling
 from . import random_effects as random_effects_utils
+from ..pedigree.relations import apply_relation_to_values
 
 
 class Effect:
@@ -26,6 +27,14 @@ class Effect:
         Updates any cached state that depends on the current trait inputs.
         '''
         return None
+
+    def requires_per_generation_trait_updates(self, inputs: dict = None,
+                                              pop: Population = None) -> bool:
+        '''
+        Returns whether this effect requires trait values to be updated after
+        each simulated generation in forward simulations.
+        '''
+        return False
 
     def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
@@ -237,42 +246,188 @@ class GeneticEffect(Effect):
 
 class FixedEffect(Effect):
     '''
-    Stores the coefficient for a single fixed-effect covariate.
+    Stores one deterministic transformed source effect.
     '''
+    VALID_RELATIONS = {'self', 'parents'}
+    VALID_REDUCERS = {'mean', 'sum'}
 
     def __init__(self, name: str, beta: float = None, var: float = None,
-                 input_name: str = None, is_trait: bool = False):
+                 input_name: str = None, is_trait: Optional[bool] = None,
+                 input_component: str = None, relation: str = 'self',
+                 reduce: str = 'mean', weights: np.ndarray = None):
         super().__init__(name)
         if beta is None and var is None:
             beta = 1.0
         if beta is not None and var is not None:
             warnings.warn(f'Both beta and var were provided for fixed effect {name}; var overrides beta.')
+        if relation is None:
+            relation = 'self'
+        if relation not in self.VALID_RELATIONS:
+            raise ValueError(
+                f"relation must be one of {sorted(self.VALID_RELATIONS)} for fixed effect {name}."
+            )
+        if reduce not in self.VALID_REDUCERS:
+            raise ValueError(
+                f"reduce must be one of {sorted(self.VALID_REDUCERS)} for fixed effect {name}."
+            )
+        if weights is not None:
+            raise ValueError(
+                f'weights are not yet supported for fixed effect {name}.'
+            )
         self.beta = None if beta is None else float(beta)
         self.var = None if var is None else float(var)
         self.input_name = name if input_name is None else input_name
-        self.is_trait = bool(is_trait)
-        self.required_inputs = () if self.is_trait else (self.input_name,)
+        if is_trait is not None and not isinstance(is_trait, bool):
+            raise ValueError(f'is_trait must be True, False, or None for fixed effect {name}.')
+        self.is_trait = is_trait
+        self.input_component = input_component
+        self.relation = relation
+        self.reduce = reduce
+        self.weights = None if weights is None else np.asarray(weights, dtype=float)
+        self.required_inputs = ()
+
+    def _infer_is_trait(self, inputs: dict, pop: Population = None,
+                        require_resolution: bool = True) -> bool:
+        has_input = self.input_name in inputs
+        has_trait = pop is not None and self.input_name in pop.traits
+
+        if self.is_trait is not None:
+            if self.is_trait and not has_trait and pop is not None:
+                raise ValueError(
+                    f"Trait '{self.input_name}' was not found in the population for fixed effect {self.name}."
+                )
+            if (not self.is_trait) and self.relation != 'self':
+                raise ValueError(
+                    f"Relation-backed fixed effect {self.name} currently requires a trait-backed source."
+                )
+            if (not self.is_trait) and require_resolution and not has_input:
+                raise ValueError(
+                    f"Missing required input '{self.input_name}' for fixed effect {self.name}."
+                )
+            return bool(self.is_trait)
+
+        if has_input and has_trait:
+            raise ValueError(
+                f"Fixed effect {self.name} found both an input '{self.input_name}' and a population "
+                "trait with the same name. Set is_trait explicitly to resolve the ambiguity."
+            )
+        if has_trait:
+            return True
+        if self.relation != 'self':
+            if require_resolution:
+                raise ValueError(
+                    f"Relation-backed fixed effect {self.name} requires trait '{self.input_name}' to "
+                    'be available in the relevant source population.'
+                )
+            return True
+        if has_input:
+            return False
+        if require_resolution:
+            raise ValueError(
+                f"Could not resolve fixed effect {self.name} source '{self.input_name}' as either "
+                'a trait or an external input.'
+            )
+        return False
+
+    def uses_external_input(self, inputs: dict, pop: Population = None) -> bool:
+        return not self._infer_is_trait(inputs=inputs, pop=pop, require_resolution=False)
+
+    def _missing_past_source_population(self, pop: Population = None) -> bool:
+        if pop is None or self.relation != 'parents':
+            return False
+        parent_source = pop.relations.get('parent_source', 'past')
+        if parent_source != 'past':
+            return False
+        return not hasattr(pop, 'past') or pop.past is None or len(pop.past) < 2 or pop.past[1] is None
+
+    def _get_source_population(self, pop: Population = None,
+                               current_trait_name: str = None) -> Population:
+        if pop is None:
+            raise ValueError(
+                f"Fixed effect {self.name} requires a Population object when using a trait-backed source."
+            )
+
+        if self.relation == 'self':
+            return pop
+
+        if self.relation == 'parents':
+            parent_source = pop.relations.get('parent_source', 'past')
+            if parent_source == 'past':
+                if not hasattr(pop, 'past') or pop.past is None or len(pop.past) < 2 or pop.past[1] is None:
+                    raise ValueError(
+                        f"Fixed effect {self.name} requires pop.past[1] to resolve parents."
+                    )
+                return pop.past[1]
+            if parent_source == 'current':
+                if current_trait_name is not None and self.input_name == current_trait_name:
+                    raise ValueError(
+                        f"Fixed effect {self.name} cannot use current-population parents from the "
+                        f"same trait '{current_trait_name}' because that would create a recursion."
+                    )
+                return pop
+            raise ValueError("Relation metadata 'parent_source' must be either 'past' or 'current'.")
+
+        raise ValueError(f"Unsupported relation '{self.relation}' for fixed effect {self.name}.")
+
+    def _resolve_trait_values(self, pop: Population = None,
+                              current_trait_name: str = None) -> np.ndarray:
+        source_pop = self._get_source_population(pop=pop, current_trait_name=current_trait_name)
+        if self.input_name not in source_pop.traits:
+            raise ValueError(
+                f"Trait '{self.input_name}' was not found in the source population for fixed effect {self.name}."
+            )
+        source_trait = source_pop.traits[self.input_name]
+        if self.input_component is None:
+            values = source_trait.y
+        else:
+            if self.input_component not in source_trait.y_:
+                raise ValueError(
+                    f"Trait '{self.input_name}' does not contain component '{self.input_component}' "
+                    f"for fixed effect {self.name}."
+                )
+            values = source_trait.y_[self.input_component]
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1:
+            raise ValueError(f"Trait-backed source for fixed effect {self.name} must be 1D.")
+        return values
+
+    def resolve_source_values(self, inputs: dict, pop: Population = None,
+                              current_trait_name: str = None) -> np.ndarray:
+        is_trait = self._infer_is_trait(inputs=inputs, pop=pop, require_resolution=True)
+        if is_trait:
+            source_values = self._resolve_trait_values(pop=pop, current_trait_name=current_trait_name)
+        else:
+            source_values = np.asarray(inputs[self.input_name], dtype=float)
+            if source_values.ndim != 1:
+                raise ValueError(f"Input '{self.input_name}' must be a 1D array.")
+
+        N = int(inputs['N'])
+        return apply_relation_to_values(
+            relations={} if pop is None else pop.relations,
+            relation=self.relation,
+            values=source_values,
+            N=N,
+            reduce=self.reduce,
+        )
 
     def generate_component(self, inputs: dict, pop: Population = None) -> np.ndarray:
         '''
         Computes realized fixed-effect values from the current covariate input.
         '''
-        if self.is_trait:
-            if pop is None:
-                raise ValueError(
-                    f"Fixed effect {self.name} requires a Population object when is_trait=True."
+        if self._infer_is_trait(inputs=inputs, pop=pop, require_resolution=False):
+            if self._missing_past_source_population(pop=pop):
+                warnings.warn(
+                    f"Fixed effect {self.name} depends on past-generation trait "
+                    f"'{self.input_name}', but that generation is not stored. "
+                    'Using zeros for this component until the required past generation becomes available.'
                 )
-            if self.input_name not in pop.traits:
-                raise ValueError(
-                    f"Trait '{self.input_name}' was not found in the population for fixed effect {self.name}."
-                )
-            x = np.asarray(pop.traits[self.input_name].y, dtype=float)
-        else:
-            if self.input_name not in inputs:
-                raise ValueError(f"Missing required input '{self.input_name}' for effect {self.name}.")
-            x = np.asarray(inputs[self.input_name], dtype=float)
-        if x.ndim != 1:
-            raise ValueError(f"Input '{self.input_name}' must be a 1D array.")
+                return np.zeros(int(inputs['N']), dtype=float)
+
+        x = self.resolve_source_values(
+            inputs=inputs,
+            pop=pop,
+            current_trait_name=inputs.get('_current_trait_name'),
+        )
         values = x if self.beta is None else self.beta * x
         if self.var is None:
             return values
@@ -283,6 +438,17 @@ class FixedEffect(Effect):
                 return np.zeros_like(values)
             raise ValueError(f'Cannot rescale zero-variance fixed effect {self.name}.')
         return values * np.sqrt(self.var / current_var)
+
+    def requires_per_generation_trait_updates(self, inputs: dict = None,
+                                              pop: Population = None) -> bool:
+        if self.relation == 'self':
+            return False
+        if inputs is None:
+            return True
+        try:
+            return self._infer_is_trait(inputs=inputs, pop=pop, require_resolution=False)
+        except ValueError:
+            return True
 
 class RandomEffect(Effect):
     '''
