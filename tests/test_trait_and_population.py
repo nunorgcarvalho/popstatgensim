@@ -8,6 +8,7 @@ from popstatgensim.traits import (
     RandomEffect,
     simulate_pgs_standardized_weights,
 )
+from popstatgensim.utils import summarize_matrix_error
 
 
 def test_population_trait_can_reference_existing_population_trait():
@@ -439,3 +440,80 @@ def test_trait_simulate_pgs_weights_wraps_additive_effects():
     expected = simulate_pgs_standardized_weights(beta=beta, h2=h2, R2=0.1, seed=seed)
 
     np.testing.assert_allclose(observed, expected)
+
+
+def test_prune_sibs_applies_min_and_max_filters_deterministically():
+    pop = psg.Population(N=6, M=5, p_init=0.3, seed=17)
+    pop.relations["full_sibs"] = np.array([0, 0, 0, 1, 1, -1], dtype=np.int32)
+
+    pruned = pop.prune_sibs(min_n_sibs=2, max_n_sibs=2, seed=7, keep_past_generations=0)
+
+    expected_first_family = np.sort(
+        np.random.default_rng(7).choice(np.array([0, 1, 2]), size=2, replace=False)
+    )
+    expected_keep = np.concatenate([expected_first_family, np.array([3, 4])])
+
+    assert pruned.N == 4
+    np.testing.assert_array_equal(pruned.G, pop.G[expected_keep])
+    np.testing.assert_array_equal(
+        np.sort(np.bincount(pruned.relations["full_sibs"])),
+        np.array([2, 2]),
+    )
+
+
+def test_impute_gpar_sibs_linear_returns_family_mean_and_warns_on_singletons():
+    pop = psg.Population(N=4, M=4, p_init=0.35, seed=18)
+    pop.relations["full_sibs"] = np.array([0, 0, 1, -1], dtype=np.int32)
+
+    with pytest.warns(UserWarning, match="n_sibs=1"):
+        result = pop.impute_Gpar(method="sibs_linear")
+
+    expected = np.empty((pop.N, pop.M), dtype=float)
+    expected[[0, 1]] = 2.0 * pop.G[[0, 1]].mean(axis=0, dtype=float)
+    expected[2] = 2.0 * pop.G[2]
+    expected[3] = 2.0 * pop.G[3]
+
+    np.testing.assert_allclose(result["Gpar"], expected)
+    np.testing.assert_array_equal(result["n_sibs"], np.array([2, 2, 1, 1], dtype=np.int32))
+
+
+def test_impute_gpar_af_pop_matches_population_frequency_formula():
+    pop = psg.Population(N=5, M=6, p_init=np.linspace(0.2, 0.7, 6), seed=19)
+
+    result = pop.impute_Gpar(method="AF_pop")
+
+    expected = pop.G + 2.0 * pop.p[None, :]
+    np.testing.assert_allclose(result["Gpar"], expected)
+
+
+def test_impute_gpar_af_pcs_matches_pca_reconstruction_formula():
+    pop = psg.Population(N=8, M=6, p_init=np.linspace(0.15, 0.75, 6), seed=20)
+    pca = pop.compute_PCA(n_components=2)
+
+    result = pop.impute_Gpar(method="AF_PCs", n_components=2, pca=pca)
+
+    scores = np.asarray(pca.scores[:, :2], dtype=float)
+    eigenvalues = np.asarray(pca.eigenvalues[:2], dtype=float)
+    loadings = (np.asarray(pop.X, dtype=float).T @ scores) / eigenvalues[None, :]
+    X_hat = scores @ loadings.T
+    scale = np.sqrt(2.0 * pop.p * (1.0 - pop.p))
+    p_adjusted = np.clip(pop.p[None, :] + 0.5 * scale[None, :] * X_hat, 0.0, 1.0)
+    expected = pop.G + 2.0 * p_adjusted
+
+    np.testing.assert_allclose(result["Gpar"], expected)
+    assert result["n_components_used"] == 2
+    assert 0.0 <= result["fraction_af_clipped"] <= 1.0
+
+
+def test_impute_gpar_compute_error_uses_shared_matrix_metrics():
+    pop = psg.Population(N=6, M=5, p_init=0.3, seed=21, keep_past_generations=1)
+    pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
+
+    result = pop.impute_Gpar(method="AF_pop", compute_error=True)
+    expected = summarize_matrix_error(pop.get_Gpar(), result["Gpar"])
+
+    for key, value in expected.items():
+        if np.isnan(value):
+            assert np.isnan(result["error_metrics"][key])
+        else:
+            np.testing.assert_allclose(result["error_metrics"][key], value)

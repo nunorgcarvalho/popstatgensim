@@ -23,6 +23,7 @@ from ..plotting import common as common_plotting
 from ..plotting import genome as genome_plotting
 from ..traits import effect_sampling as trait_sampling
 from ..traits.trait import Trait
+from ..utils import matrix_metrics as utils_matrix_metrics
 from ..utils import misc as misc_utils
 from ..utils import stats as stats_utils
 
@@ -234,6 +235,37 @@ class Population:
         Returns a dense matrix representation of one stored relation.
         '''
         return pedigree_relations.get_relation_matrix(self.relations, relation, self.N, dtype=dtype)
+
+    def _get_full_sibships(self) -> list[np.ndarray]:
+        '''
+        Returns lists of row indices for each full-sib family in the current generation.
+
+        Individuals with missing `full_sibs` labels are treated as singleton families.
+        '''
+        family_ids = np.asarray(self.relations['full_sibs'], dtype=np.int32)
+        if family_ids.ndim != 1 or family_ids.shape[0] != self.N:
+            raise ValueError("Compact 'full_sibs' relation must have shape (N,).")
+
+        sibships = []
+        valid_mask = family_ids >= 0
+        if np.any(valid_mask):
+            for family_id in np.unique(family_ids[valid_mask]):
+                sibships.append(np.flatnonzero(family_ids == family_id).astype(np.int32, copy=False))
+
+        singleton_idx = np.flatnonzero(~valid_mask)
+        for idx in singleton_idx:
+            sibships.append(np.array([idx], dtype=np.int32))
+
+        return sibships
+
+    def _get_full_sibship_sizes(self) -> np.ndarray:
+        '''
+        Returns the size of each individual's full-sib family, including the individual.
+        '''
+        n_sibs = np.ones(self.N, dtype=np.int32)
+        for sibship in self._get_full_sibships():
+            n_sibs[sibship] = sibship.size
+        return n_sibs
 
     def get_G_std(self) -> np.ndarray:
         '''
@@ -543,6 +575,65 @@ class Population:
             new_pop.traits[name] = trait_new
 
         return new_pop
+
+    def prune_sibs(self, max_n_sibs: int = None,
+                   min_n_sibs: int = None,
+                   seed: int = None,
+                   keep_past_generations: int = None) -> 'Population':
+        '''
+        Returns a population pruned by full-sib family size.
+
+        Families smaller than `min_n_sibs` are removed entirely. Families larger than
+        `max_n_sibs` are down-sampled uniformly at random so that exactly
+        `max_n_sibs` members remain. Family sizes here include the focal individual,
+        so singleton families have size 1.
+        Parameters:
+            max_n_sibs (int): Maximum allowed full-sib family size after pruning.
+            min_n_sibs (int): Minimum allowed full-sib family size after pruning.
+            seed (int): Optional seed controlling random down-sampling within large
+                families.
+            keep_past_generations (int): Number of ancestral generations to preserve
+                in the returned population. Defaults to the current object's value.
+        Returns:
+            Population: Pruned population.
+        '''
+        if max_n_sibs is None and min_n_sibs is None:
+            raise ValueError('Must provide at least one of `max_n_sibs` or `min_n_sibs`.')
+
+        if max_n_sibs is not None:
+            max_n_sibs = int(max_n_sibs)
+            if max_n_sibs < 1:
+                raise ValueError('`max_n_sibs` must be at least 1 when provided.')
+        if min_n_sibs is not None:
+            min_n_sibs = int(min_n_sibs)
+            if min_n_sibs < 1:
+                raise ValueError('`min_n_sibs` must be at least 1 when provided.')
+        if min_n_sibs is not None and max_n_sibs is not None and min_n_sibs > max_n_sibs:
+            raise ValueError('`min_n_sibs` cannot exceed `max_n_sibs`.')
+
+        if keep_past_generations is None:
+            keep_past_generations = self.keep_past_generations
+
+        rng = np.random.default_rng(seed)
+        keep_mask = np.zeros(self.N, dtype=bool)
+        for sibship in self._get_full_sibships():
+            family_size = sibship.size
+            if min_n_sibs is not None and family_size < min_n_sibs:
+                continue
+            sibship_keep = sibship
+            if max_n_sibs is not None and family_size > max_n_sibs:
+                sibship_keep = np.sort(
+                    rng.choice(sibship, size=max_n_sibs, replace=False).astype(np.int64, copy=False)
+                )
+            keep_mask[sibship_keep] = True
+
+        if not np.any(keep_mask):
+            raise ValueError('No individuals remain after applying the sibling-pruning filters.')
+
+        return self.subset_individuals(
+            np.flatnonzero(keep_mask),
+            keep_past_generations=keep_past_generations,
+        )
 
     def find_unrelated_individuals(self, threshold: float,
                                    source: str = 'GRM',
@@ -1079,6 +1170,158 @@ class Population:
         self.G_par = G_unique[inverse[:, 0]] + G_unique[inverse[:, 1]]
         return self.G_par
 
+    def impute_Gpar(self, method: str,
+                    compute_error: bool = False,
+                    **kwargs) -> dict:
+        '''
+        Imputes the sum of parental genotypes for the current generation.
+        Parameters:
+            method (str): Imputation method. Supported values are:
+                - 'sibs_linear': Uses the full-sib family mean and doubles it.
+                - 'AF_pop': Uses the proband genotype plus twice the population allele frequency.
+                - 'AF_PCs': Uses the proband genotype plus twice a PC-adjusted allele frequency.
+            compute_error (bool): Whether to compare the imputed matrix to the true
+                parental genotype matrix returned by `get_Gpar()`.
+            **kwargs: Method-specific keyword arguments passed to the selected helper.
+        Returns:
+            dict: Dictionary containing the imputed matrix under key 'Gpar' and any
+            method-specific diagnostics.
+        '''
+        method_key = str(method).strip().lower()
+        method_map = {
+            'sibs_linear': self._impute_Gpar_sibs_linear,
+            'af_pop': self._impute_Gpar_AF_pop,
+            'af_pcs': self._impute_Gpar_AF_PCs,
+        }
+        if method_key not in method_map:
+            supported = ', '.join(sorted(method_map))
+            raise ValueError(f"Unknown Gpar imputation method '{method}'. Supported values are: {supported}.")
+
+        result = method_map[method_key](**kwargs)
+        if not isinstance(result, dict) or 'Gpar' not in result:
+            raise ValueError("Imputation helpers must return a dictionary containing key 'Gpar'.")
+
+        Gpar_imputed = np.asarray(result['Gpar'], dtype=float)
+        if Gpar_imputed.shape != (self.N, self.M):
+            raise ValueError(
+                f"Imputed Gpar matrix must have shape {(self.N, self.M)}, got {Gpar_imputed.shape}."
+            )
+
+        output = dict(result)
+        output['Gpar'] = Gpar_imputed
+        output['method'] = method_key
+        if compute_error:
+            output['error_metrics'] = utils_matrix_metrics.summarize_matrix_error(
+                self.get_Gpar(),
+                Gpar_imputed,
+            )
+        return output
+
+    def _impute_Gpar_sibs_linear(self) -> dict:
+        '''
+        Imputes parental genotypes as twice the full-sib family mean genotype.
+        '''
+        Gpar = np.empty((self.N, self.M), dtype=float)
+        n_sibs = np.ones(self.N, dtype=np.int32)
+        for sibship in self._get_full_sibships():
+            Gpar[sibship, :] = 2.0 * self.G[sibship, :].mean(axis=0, dtype=float)
+            n_sibs[sibship] = sibship.size
+
+        if np.any(n_sibs == 1):
+            warnings.warn(
+                'Some samples have n_sibs=1, so the sibs_linear imputed Gpar is '
+                'perfectly collinear with the proband genotype for those samples.',
+                UserWarning,
+            )
+
+        return {
+            'Gpar': Gpar,
+            'n_sibs': n_sibs,
+        }
+
+    def _impute_Gpar_AF_pop(self) -> dict:
+        '''
+        Imputes parental genotypes using population-level allele frequencies.
+        '''
+        return {
+            'Gpar': np.asarray(self.G, dtype=float) + 2.0 * np.asarray(self.p, dtype=float)[None, :],
+        }
+
+    def _estimate_pc_adjusted_allele_frequencies(self,
+                                                 n_components: int = 4,
+                                                 pca: genome_pca.PCAResult = None,
+                                                 clip: bool = True) -> tuple[np.ndarray, dict]:
+        '''
+        Estimates individual-specific allele frequencies from a PCA reconstruction.
+        '''
+        max_components = min(self.N, self.M)
+        if max_components < 1:
+            raise ValueError('Population must contain at least one sample and one variant.')
+
+        if n_components is None:
+            n_components = min(4, max_components)
+        n_components = int(n_components)
+        if n_components < 1:
+            raise ValueError('`n_components` must be at least 1.')
+
+        if pca is None:
+            n_components = min(n_components, max_components)
+            pca = self.compute_PCA(n_components=n_components)
+        else:
+            if pca.n_samples != self.N or pca.n_features != self.M:
+                raise ValueError('Provided PCAResult is incompatible with the current population.')
+            if n_components > pca.scores.shape[1]:
+                raise ValueError(
+                    f"Requested n_components={n_components}, but provided PCAResult only has "
+                    f"{pca.scores.shape[1]} component(s)."
+                )
+
+        X = np.asarray(self.X, dtype=float)
+        scores = np.asarray(pca.scores[:, :n_components], dtype=float)
+        eigenvalues = np.asarray(pca.eigenvalues[:n_components], dtype=float)
+        positive = eigenvalues > 0
+        if not np.any(positive):
+            raise ValueError('Selected principal components have zero eigenvalue and cannot be used.')
+        if not np.all(positive):
+            scores = scores[:, positive]
+            eigenvalues = eigenvalues[positive]
+
+        loadings = (X.T @ scores) / eigenvalues[None, :]
+        X_hat = scores @ loadings.T
+
+        p = np.asarray(self.p, dtype=float)
+        scale = np.sqrt(2.0 * p * (1.0 - p))
+        p_adjusted_raw = p[None, :] + 0.5 * scale[None, :] * X_hat
+        fraction_af_clipped = float(np.mean((p_adjusted_raw < 0.0) | (p_adjusted_raw > 1.0)))
+        p_adjusted = np.clip(p_adjusted_raw, 0.0, 1.0) if clip else p_adjusted_raw
+
+        total_ss = float(np.sum(X * X))
+        resid_ss = float(np.sum((X - X_hat) ** 2))
+        reconstruction_r2 = np.nan if np.isclose(total_ss, 0.0) else float(1.0 - resid_ss / total_ss)
+
+        diagnostics = {
+            'n_components_used': int(scores.shape[1]),
+            'pc_reconstruction_r2': reconstruction_r2,
+            'fraction_af_clipped': fraction_af_clipped,
+        }
+        return p_adjusted, diagnostics
+
+    def _impute_Gpar_AF_PCs(self, n_components: int = 4,
+                            pca: genome_pca.PCAResult = None,
+                            clip: bool = True) -> dict:
+        '''
+        Imputes parental genotypes using PC-adjusted allele frequencies.
+        '''
+        p_adjusted, diagnostics = self._estimate_pc_adjusted_allele_frequencies(
+            n_components=n_components,
+            pca=pca,
+            clip=clip,
+        )
+        return {
+            'Gpar': np.asarray(self.G, dtype=float) + 2.0 * p_adjusted,
+            **diagnostics,
+        }
+
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
                            mu: Union[float, np.ndarray] = 0,
                            **kwargs) -> np.ndarray:
@@ -1172,6 +1415,8 @@ class Population:
         Parameters:
             generations (int): Number of past generations to include in the new population object. Default is 1, meaning only the current and the previous generation are combined.
         '''
+        from .superpopulation import SuperPopulation
+
         # creates a SuperPopulation object with the current generation and the specified number of past generations
         pops = []
         Ns = []
