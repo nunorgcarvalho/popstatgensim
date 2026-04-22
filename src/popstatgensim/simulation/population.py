@@ -966,7 +966,7 @@ class Population:
 
     def simulate_generations(self, generations: int = 1, related_offspring: bool = True,
                              trait_updates: bool = False, verbose: bool = False,
-                             **kwargs):
+                             n_offspring_dist: str = 'poisson', **kwargs):
         '''
         Simulates specified number of generations beyond current generation. Can simulate offspring directly. Automatically updates object. Recombination rates are extracted from object attributes.
 
@@ -975,7 +975,11 @@ class Population:
             related_offspring (bool): Whether the offspring of the next generation should be directly related to parents from previous generation by simulating meiosis and haplotype transfer. Default is True. If false, future offspring have alleles drawn randomly from allele frequencies.
             trait_updates (bool): Whether to update traits after each generation. However, sex is always updated in each generation, regardless of this setting. Default is False, meaning that traits are only updated at the end of the simulation.
             verbose (bool): Whether to print a progress message after each simulated generation. Default is False.
-            **kwargs: All other arguments are passed to the `next_generation` or `generate_offspring` methods. See those methods for details.
+            n_offspring_dist (str): Distribution of offspring counts across mate pairs
+                when `related_offspring=True`. Supported values are 'poisson'
+                (default) and 'constant'. Ignored when `related_offspring=False`.
+            **kwargs: All other arguments are passed to the `next_generation` or
+                `generate_offspring` methods. See those methods for details.
         '''
         am_kwargs = {'AM_r', 'AM_trait', 'AM_type'}
         if generations > 1 and not trait_updates and any(key in kwargs for key in am_kwargs):
@@ -1008,7 +1012,10 @@ class Population:
         # loops through each generation
         for t in range(generations):
             if related_offspring:
-                (H, relations, Haplos) = self.generate_offspring(**kwargs)
+                (H, relations, Haplos) = self.generate_offspring(
+                    n_offspring_dist=n_offspring_dist,
+                    **kwargs,
+                )
             else:
                 H = self.next_generation(**kwargs)
                 Haplos = None
@@ -1084,6 +1091,62 @@ class Population:
         spouse_idx[iPs] = iMs
 
         return ((iMs, iPs), spouse_idx)
+
+    def _sample_offspring_pair_counts(self, P_mate: np.ndarray, N_offspring: int,
+                                      n_offspring_dist: str = 'poisson') -> np.ndarray:
+        '''
+        Draws the number of offspring assigned to each mate pair.
+
+        Parameters:
+            P_mate (1D array): Probability or expected-weight vector across mate pairs.
+            N_offspring (int): Total number of offspring to allocate across mate pairs.
+            n_offspring_dist (str): Distribution of offspring counts across mate pairs.
+                Supported values are:
+                - 'poisson': Current behavior, equivalent to sampling each offspring's
+                  mate pair independently from `P_mate`.
+                - 'constant': Allocates offspring as evenly as possible across mate
+                  pairs by taking `floor(N_offspring * P_mate)` and then assigning one
+                  extra offspring to randomly chosen pairs based on the residual
+                  fractions until the total reaches `N_offspring`.
+        Returns:
+            1D int array: Number of offspring assigned to each mate pair.
+        '''
+        n_offspring_dist = str(n_offspring_dist).strip().lower()
+        P_mate = np.asarray(P_mate, dtype=float)
+
+        if P_mate.ndim != 1:
+            raise ValueError('`P_mate` must be a 1D array.')
+        if P_mate.size == 0:
+            raise ValueError('Must provide at least one mate pair.')
+        if N_offspring < 0:
+            raise ValueError('`N_offspring` must be non-negative.')
+
+        P_mate_sum = P_mate.sum()
+        if P_mate_sum <= 0:
+            raise ValueError('`P_mate` must sum to a positive value.')
+        P_mate = P_mate / P_mate_sum
+
+        if n_offspring_dist == 'poisson':
+            return np.random.multinomial(N_offspring, P_mate).astype(np.int32, copy=False)
+
+        if n_offspring_dist != 'constant':
+            raise ValueError("`n_offspring_dist` must be either 'poisson' or 'constant'.")
+
+        target_counts = N_offspring * P_mate
+        offspring_counts = np.floor(target_counts).astype(np.int32)
+        remainder = int(N_offspring - offspring_counts.sum())
+
+        if remainder > 0:
+            fractional_counts = target_counts - offspring_counts
+            fractional_sum = fractional_counts.sum()
+            if np.isclose(fractional_sum, 0.0):
+                extra_prob = np.full(P_mate.size, 1 / P_mate.size)
+            else:
+                extra_prob = fractional_counts / fractional_sum
+            extra_pairs = np.random.choice(P_mate.size, size=remainder, replace=False, p=extra_prob)
+            offspring_counts[extra_pairs] += 1
+
+        return offspring_counts
 
     def get_spouse_corr(self, trait: str, type: str = 'phenotypic') -> float:
         '''
@@ -1324,12 +1387,23 @@ class Population:
 
     def generate_offspring(self, s: Union[float, np.ndarray] = 0,
                            mu: Union[float, np.ndarray] = 0,
+                           n_offspring_dist: str = 'poisson',
                            **kwargs) -> np.ndarray:
         '''
-        Pairs up mates and generates offspring for parents' haplotypes. Only works for diploids. Each pair always has two offspring. Recombination rates are extracted from object attributes. Also updates parent-child relationship matrix.
+        Pairs up mates and generates offspring from parents' haplotypes. Only works
+        for diploids. Recombination rates are extracted from object attributes. Also
+        updates parent-child relationship matrices.
         Parameters:
             s (float or 1D array): Selection coefficient, such that an individual with the alternate allele has a (1+s) relative fitness compared to the reference allele. Occurs before mutation. If only a single value is provided, it is treated as the selection coefficient for all variants. Otherwise, must be an array of length M. Default is 0 (no selection).
             mu (float or 1D array): Mutation rate, such that the probability of any individual allele flipping to its alternate in the next generation is given by mu. Occurs after selection (i.e. mutation occurs in germline of current generation). Default is 0 (no mutations).
+            n_offspring_dist (str): Distribution of offspring counts across mate
+                pairs. Supported values are:
+                - 'poisson' (default): Current implementation, where each offspring's
+                  mate pair is sampled independently from the pair weights.
+                - 'constant': Allocates offspring as evenly as possible across mate
+                  pairs by taking the floor of each pair's expected offspring count and
+                  randomly adding one extra offspring to some pairs until the total
+                  reaches the target.
             **kwargs: All other arguments (related to assortative mating) are passed to the `_pair_mates` method. See that method for details.
         Returns:
             H (3D array): N*M*P array of offspring haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
@@ -1358,8 +1432,15 @@ class Population:
         P_mate = W_pair / W_pair.sum()
         # determines population size of next generation (currently maintains population size)
         N_offspring = self.N
-        # draws indices of parents for each offspring
-        i_mate = np.random.choice(np.arange(len(iMs)), size=N_offspring, p=P_mate)
+        # draws how many offspring each mate pair has, then expands to per-offspring
+        # parent indices.
+        offspring_counts = self._sample_offspring_pair_counts(
+            P_mate=P_mate,
+            N_offspring=N_offspring,
+            n_offspring_dist=n_offspring_dist,
+        )
+        i_mate = np.repeat(np.arange(len(iMs), dtype=np.int32), offspring_counts)
+        np.random.shuffle(i_mate)
         parents = np.stack((iMs[i_mate], iPs[i_mate]), axis=1).astype(np.int32, copy=False)
         family_ids = i_mate.astype(np.int32, copy=False)
 

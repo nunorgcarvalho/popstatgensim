@@ -517,3 +517,46 @@ def test_impute_gpar_compute_error_uses_shared_matrix_metrics():
             assert np.isnan(result["error_metrics"][key])
         else:
             np.testing.assert_allclose(result["error_metrics"][key], value)
+
+
+def test_generate_offspring_rejects_unknown_offspring_distribution():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=22)
+
+    with pytest.raises(ValueError, match="n_offspring_dist"):
+        pop.generate_offspring(n_offspring_dist="unsupported")
+
+
+def test_constant_offspring_distribution_balances_noninteger_expected_counts():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=23)
+
+    counts = pop._sample_offspring_pair_counts(
+        P_mate=np.full(pop.N // 2, 1.0 / (pop.N // 2)),
+        N_offspring=5,
+        n_offspring_dist="constant",
+    )
+
+    np.testing.assert_array_equal(np.sort(counts), np.array([1, 2, 2], dtype=np.int32))
+    assert counts.sum() == 5
+
+
+def test_generate_offspring_constant_distribution_gives_two_children_per_pair_when_balanced():
+    pop = psg.Population(N=8, M=4, p_init=0.3, seed=24)
+
+    _, relations, _ = pop.generate_offspring(n_offspring_dist="constant")
+
+    family_sizes = np.bincount(relations["full_sibs"], minlength=pop.N // 2)
+    np.testing.assert_array_equal(family_sizes, np.full(pop.N // 2, 2, dtype=int))
+
+
+def test_simulate_generations_passes_constant_offspring_distribution():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=25, keep_past_generations=1)
+
+    pop.simulate_generations(
+        generations=1,
+        related_offspring=True,
+        trait_updates=False,
+        n_offspring_dist="constant",
+    )
+
+    family_sizes = np.bincount(pop.relations["full_sibs"], minlength=pop.N // 2)
+    np.testing.assert_array_equal(family_sizes, np.full(pop.N // 2, 2, dtype=int))
