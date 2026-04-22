@@ -141,6 +141,8 @@ class Population:
         self._X = None
         self._G_std = None
         self._G_par_std = None
+        self._GRM_cache = {}
+        self._DGRM_cache = {}
         self._X_dtype = np.float32
         # recombination rates
         if R_type == 'blocks':
@@ -289,6 +291,86 @@ class Population:
             return self._G_par_std
         return np.asarray(trait_sampling.get_G_std_for_effects(G_par, P=2 * self.P), dtype=np.float32)
 
+    def _get_standardized_genotypes(self, std_method: str = 'observed') -> np.ndarray:
+        '''
+        Returns a standardized genotype matrix for the current generation.
+
+        The default ``std_method='observed'`` reuses ``Population.X``. Other
+        standardization methods are computed on demand.
+        '''
+        std_method = str(std_method).strip().lower()
+        if std_method == 'observed':
+            return np.asarray(self.X, dtype=float)
+        if std_method == 'binomial':
+            return np.asarray(
+                genome_genotypes.standardize_G(
+                    self.G,
+                    self.p,
+                    self.P,
+                    impute=True,
+                    std_method=std_method,
+                ),
+                dtype=float,
+            )
+        raise ValueError("`std_method` must be either 'observed' or 'binomial'.")
+
+    def get_GRM(self, std_method: str = 'observed') -> np.ndarray:
+        '''
+        Returns the SNP genomic relationship matrix (GRM) for the current population.
+
+        The GRM is cached separately for each supported ``std_method`` so repeated
+        calls do not recompute it. With the default ``std_method='observed'``, this
+        wraps ``genome.compute_GRM()`` applied to ``Population.X``.
+        '''
+        std_method = str(std_method).strip().lower()
+        if std_method not in self._GRM_cache:
+            X = self._get_standardized_genotypes(std_method=std_method)
+            self._GRM_cache[std_method] = np.asarray(
+                genome_genotypes.compute_GRM(X),
+                dtype=float,
+            )
+        return self._GRM_cache[std_method]
+
+    def get_DGRM(self, method: str = 'genome_wide',
+                 std_method: str = 'binomial') -> np.ndarray:
+        '''
+        Returns the assortative-mating disequilibrium GRM (DGRM) for the current
+        population.
+
+        Parameters:
+            method (str): DGRM construction method. Currently only
+                ``'genome_wide'`` is supported, which computes
+                ``D = C^{-1} (G^2 - (N / M) G)`` using the current analyzed sample.
+            std_method (str): Genotype standardization method used to build the
+                underlying GRM. This defaults to ``'binomial'`` rather than
+                ``'observed'`` because assortative mating inflates observed
+                per-SNP genotype variance, and the binomial scaling matches the
+                genome-wide Zhang et al. DGREML implementation.
+        Returns:
+            DGRM (2D array): N*N disequilibrium relationship matrix.
+        '''
+        method = str(method).strip().lower()
+        std_method = str(std_method).strip().lower()
+        cache_key = (method, std_method)
+        if cache_key in self._DGRM_cache:
+            return self._DGRM_cache[cache_key]
+
+        if method != 'genome_wide':
+            raise ValueError("Only `method='genome_wide'` is currently supported.")
+
+        G = self.get_GRM(std_method=std_method)
+        n = self.N
+        M = self.G.shape[1]
+        H = G @ G - (n / M) * G
+        C = np.trace(H) / n
+        if np.isclose(C, 0.0):
+            raise ValueError('DGRM normalization constant is zero or numerically unstable.')
+
+        D = np.asarray(H / C, dtype=float)
+        D = 0.5 * (D + D.T)
+        self._DGRM_cache[cache_key] = D
+        return D
+
     def get_chrom_idx(self) -> np.ndarray:
         '''
         Returns ascending chromosome start indices inferred from recombination rates.
@@ -333,6 +415,8 @@ class Population:
             self.G_par = None
             self._G_std = None
             self._G_par_std = None
+            self._GRM_cache = {}
+            self._DGRM_cache = {}
             self.p = genome_frequencies.compute_freqs(self.G, self.P)
             self.X = None
         if Haplos is not None:
@@ -409,14 +493,9 @@ class Population:
         self.corr_matrix = genome_ld.compute_corr_matrix(self.X, self.neighbor_matrix)
         self.LD_matrix = genome_ld.compute_LD_matrix(self.corr_matrix)
 
-    def store_GRM(self):
-        '''
-        Stores the genetic relationship matrix (GRM) in the `GRM` attribute using the object's standardized genotype matrix.
-        '''
-        self.GRM = genome_genotypes.compute_GRM(self.X)
-
     def get_relatedness_matrix(self, source: str = 'GRM',
-                               standardize_ibd: bool = False) -> np.ndarray:
+                               standardize_ibd: bool = False,
+                               std_method: str = 'observed') -> np.ndarray:
         '''
         Returns a pairwise relatedness matrix for the current population.
         Parameters:
@@ -425,14 +504,15 @@ class Population:
                 - 'IBD': True relatedness from tracked haplotype IDs.
             standardize_ibd (bool): Passed to the true-IBD relatedness computation when
                 `source='IBD'`. Default is False.
+            std_method (str): Genotype standardization method used when
+                `source='GRM'`. Passed to `Population.get_GRM()`. Default is
+                `'observed'`.
         Returns:
             relatedness (2D array): N*N relatedness matrix.
         '''
         source = source.upper()
         if source == 'GRM':
-            if hasattr(self, 'GRM') and self.GRM is not None:
-                return np.asarray(self.GRM, dtype=float)
-            return np.asarray(genome_genotypes.compute_GRM(self.X), dtype=float)
+            return np.asarray(self.get_GRM(std_method=std_method), dtype=float)
         if source == 'IBD':
             return np.asarray(
                 pedigree_ibd.compute_K_IBD(self.Haplos, standardize=standardize_ibd),
@@ -490,8 +570,16 @@ class Population:
             new_pop.Haplos = self.Haplos[i_keep, :, :].copy()
         if self._X is not None:
             new_pop.X = self._X[i_keep, :].copy()
-        if hasattr(self, 'GRM') and self.GRM is not None:
-            new_pop.GRM = self.GRM[np.ix_(i_keep, i_keep)].copy()
+        if self._GRM_cache:
+            new_pop._GRM_cache = {
+                key: value[np.ix_(i_keep, i_keep)].copy()
+                for key, value in self._GRM_cache.items()
+            }
+        if self._DGRM_cache:
+            new_pop._DGRM_cache = {
+                key: value[np.ix_(i_keep, i_keep)].copy()
+                for key, value in self._DGRM_cache.items()
+            }
 
         idx_map = np.full(self.N, -1, dtype=np.int32)
         idx_map[i_keep] = np.arange(i_keep.size, dtype=np.int32)
@@ -696,9 +784,16 @@ class Population:
             return (pop_new, i_keep)
         return pop_new
 
-    def get_RDR_SNP_GRMs(self, G_par: np.ndarray = None) -> list:
+    def get_RDR_SNP_GRMs(self, G_par: np.ndarray = None,
+                         std_method: str = 'observed') -> list:
         '''
         Constructs the three SNP-based GRMs used for Related Disequilibrium Regression (RDR). This could be done more efficiently by reusing intermediate calculations, but is currently implemented in a straightforward way for clarity.\
+
+        Parameters:
+            G_par (2D array): Optional parental genotype-sum matrix. If not
+                provided, this is obtained from `Population.get_Gpar()`.
+            std_method (str): Genotype standardization method passed to
+                `standardize_G()`. Default is `'observed'`.
 
         Returns:
             list: `[R_oo, R_pp, R_op]`, where:
@@ -712,16 +807,16 @@ class Population:
             - `X_par` is the standardized version of `G_par` with column mean 0 and variance 2.
         '''
         G_o = self.G
-        X_o = genome_genotypes.standardize_G(G_o, self.p, self.P, impute=True, std_method='observed')
+        X_o = self._get_standardized_genotypes(std_method=std_method)
 
         if G_par is None:
             G_par = self.get_Gpar()
         p_par = G_par.mean(axis=0) / (2 * self.P)
         X_par = genome_genotypes.standardize_G(G_par, p_par, 2 * self.P, impute=True,
-                                  std_method='observed', target_var=2.0)
+                                  std_method=std_method, target_var=2.0)
 
         M = G_o.shape[1]
-        R_oo = genome_genotypes.compute_GRM(X_o)
+        R_oo = self.get_GRM(std_method=std_method)
         R_pp = genome_genotypes.compute_GRM(X_par) / 2
         R_op = (X_o @ X_par.T + X_par @ X_o.T) / (2 * M)
 
