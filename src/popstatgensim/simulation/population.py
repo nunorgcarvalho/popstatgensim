@@ -198,6 +198,7 @@ class Population:
         Changes the recombination rates to make all sites independent.
         '''
         self.R = 0.5 * np.ones(self.M)
+        self._DGRM_cache = {}
 
     def set_founding_haplotypes(self):
         '''
@@ -338,9 +339,14 @@ class Population:
         population.
 
         Parameters:
-            method (str): DGRM construction method. Currently only
-                ``'genome_wide'`` is supported, which computes
-                ``D = C^{-1} (G^2 - (N / M) G)`` using the current analyzed sample.
+            method (str): DGRM construction method. Supported values are:
+                - ``'genome_wide'``: computes
+                  ``D = C^{-1} (G^2 - (N / M) G)`` using the current analyzed
+                  sample.
+                - ``'between_chroms'``: reproduces the between-chromosome DGRM
+                  construction in the authors' ``makeDGRM.cpp`` by accumulating
+                  chromosome-specific ``zz_k`` blocks and retaining only the
+                  cross-chromosome component.
             std_method (str): Genotype standardization method used to build the
                 underlying GRM. This defaults to ``'binomial'`` rather than
                 ``'observed'`` because assortative mating inflates observed
@@ -355,18 +361,49 @@ class Population:
         if cache_key in self._DGRM_cache:
             return self._DGRM_cache[cache_key]
 
-        if method != 'genome_wide':
-            raise ValueError("Only `method='genome_wide'` is currently supported.")
-
         G = self.get_GRM(std_method=std_method)
         n = self.N
         M = self.G.shape[1]
-        H = G @ G - (n / M) * G
-        C = np.trace(H) / n
-        if np.isclose(C, 0.0):
-            raise ValueError('DGRM normalization constant is zero or numerically unstable.')
 
-        D = np.asarray(H / C, dtype=float)
+        if method == 'genome_wide':
+            H = G @ G - (n / M) * G
+            C = np.trace(H) / n
+            if np.isclose(C, 0.0):
+                raise ValueError('DGRM normalization constant is zero or numerically unstable.')
+            D = np.asarray(H / C, dtype=float)
+        elif method == 'between_chroms':
+            chrom_idx = self.get_chrom_idx()
+            if chrom_idx.size < 2:
+                raise ValueError(
+                    "The between-chromosome DGRM requires at least two chromosomes. "
+                    "Update `Population.R` so `get_chrom_idx()` identifies multiple chromosomes."
+                )
+
+            chrom_end = np.concatenate([chrom_idx[1:], np.array([M], dtype=int)])
+            X = self._get_standardized_genotypes(std_method=std_method)
+            zz_sum = G * M
+            W = np.zeros_like(G, dtype=float)
+            C = 0.0
+
+            for start, stop in zip(chrom_idx, chrom_end):
+                M_k = stop - start
+                if M_k <= 0:
+                    continue
+                zz_k = X[:, start:stop] @ X[:, start:stop].T
+                W += zz_k @ zz_k
+                pi_k = M_k / M
+                C += pi_k * pi_k
+
+            B = (zz_sum @ zz_sum - W) / (n * M * M)
+            B_bar = np.trace(B) / n
+            if np.isclose(B_bar, 0.0):
+                raise ValueError(
+                    'Between-chromosome DGRM normalization is zero or numerically unstable.'
+                )
+            D = np.asarray(((1.0 - C) / B_bar) * B, dtype=float)
+        else:
+            raise ValueError("`method` must be either 'genome_wide' or 'between_chroms'.")
+
         D = 0.5 * (D + D.T)
         self._DGRM_cache[cache_key] = D
         return D
