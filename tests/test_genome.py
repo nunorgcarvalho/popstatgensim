@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from popstatgensim import genome
 
@@ -42,6 +43,42 @@ def test_pca_runs_from_refactored_namespace():
 
     assert pca.scores.shape == (4, 2)
     assert pca.explained_variance_ratio.shape == (2,)
+
+
+def test_compute_grm_supports_variant_weights():
+    standardized = np.array(
+        [
+            [-1.0, 0.0, 2.0],
+            [0.5, 1.0, -1.0],
+            [0.5, -1.0, -1.0],
+        ]
+    )
+    weights = np.array([1.0, 0.0, 3.0])
+
+    unweighted = genome.compute_GRM(standardized)
+    weighted = genome.compute_GRM(standardized, w=weights)
+
+    np.testing.assert_allclose(
+        genome.compute_GRM(standardized, w=np.ones(standardized.shape[1])),
+        unweighted,
+    )
+    np.testing.assert_allclose(
+        weighted,
+        ((standardized * weights[None, :]) @ standardized.T) / weights.sum(),
+    )
+
+
+def test_compute_grm_rejects_invalid_variant_weights():
+    standardized = np.ones((2, 3))
+
+    with pytest.raises(ValueError, match="length"):
+        genome.compute_GRM(standardized, w=np.ones(2))
+    with pytest.raises(ValueError, match="finite"):
+        genome.compute_GRM(standardized, w=np.array([1.0, np.nan, 1.0]))
+    with pytest.raises(ValueError, match="non-negative"):
+        genome.compute_GRM(standardized, w=np.array([1.0, -1.0, 1.0]))
+    with pytest.raises(ValueError, match="positive"):
+        genome.compute_GRM(standardized, w=np.zeros(3))
 
 
 def test_genome_structure_helpers_produce_expected_shapes():

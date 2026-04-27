@@ -61,15 +61,36 @@ def standardize_G(G: np.ndarray, p: np.ndarray, P: int,
         X = X * np.sqrt(target_var)
     return X
 
-def compute_GRM(X: np.ndarray) -> np.ndarray:
+def compute_GRM(X: np.ndarray, w: np.ndarray = None) -> np.ndarray:
     '''
     Computes the genetic relationship matrix (GRM) from a standardized genotype matrix (X).
     Parameters:
         X (2D array): N*M standardized genotype matrix.
+        w (1D array): Optional array of length M containing non-negative weights
+            for each variant. If provided, the GRM is the weighted mean covariance
+            across variants.
     Returns:
         GRM (2D array): An N*N genetic relationship matrix. Each element is the mean covariance of standardized genotypes across all variants for the two individuals.
     '''
     M = X.shape[1]
-    # computes GRM
-    GRM = (X @ X.T) / M
+    if w is None:
+        # computes GRM
+        GRM = (X @ X.T) / M
+        return GRM
+
+    w = np.asarray(w, dtype=float)
+    if w.ndim != 1:
+        raise ValueError("`w` must be a 1D array.")
+    if w.shape[0] != M:
+        raise ValueError("`w` must have length equal to the number of columns in `X`.")
+    if not np.all(np.isfinite(w)):
+        raise ValueError("`w` must contain only finite values.")
+    if np.any(w < 0):
+        raise ValueError("`w` must contain non-negative weights.")
+
+    weight_sum = w.sum()
+    if weight_sum <= 0:
+        raise ValueError("`w` must contain at least one positive weight.")
+
+    GRM = ((X * w[None, :]) @ X.T) / weight_sum
     return GRM
