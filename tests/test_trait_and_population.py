@@ -188,6 +188,46 @@ def test_population_trait_with_genetic_effect_runs_through_refactored_modules():
     assert trait.inputs["G"].shape == (pop.N, pop.M)
 
 
+def test_generate_causal_effects_accepts_point_mass_alias():
+    np.random.seed(10)
+    effects, j_causal = psg.traits.generate_causal_effects(
+        M=8,
+        M_causal=4,
+        var_G=2.0,
+        dist="point_mass",
+    )
+
+    assert j_causal.shape == (4,)
+    np.testing.assert_allclose(effects[j_causal], np.sqrt(2.0 / 4))
+    assert np.count_nonzero(effects) == 4
+    assert np.isclose(np.sum(effects ** 2), 2.0)
+
+
+def test_generate_genetic_effects_supports_constant_distribution():
+    np.random.seed(11)
+    effects = psg.traits.generate_genetic_effects(
+        var_A=0.8,
+        var_A_par=0.2,
+        r=1.0,
+        M=10,
+        M_causal=5,
+        dist="constant",
+    )
+
+    effect_A = effects["A"].effects_standardized
+    effect_A_par = effects["A_par"].effects_standardized
+    j_causal_A = effects["A"].j_causal
+    j_causal_A_par = effects["A_par"].j_causal
+
+    np.testing.assert_array_equal(j_causal_A, j_causal_A_par)
+    np.testing.assert_allclose(effect_A[j_causal_A], np.sqrt(0.8 / 5))
+    np.testing.assert_allclose(effect_A_par[j_causal_A], np.sqrt(0.2 / 5))
+    assert np.count_nonzero(effect_A) == 5
+    assert np.count_nonzero(effect_A_par) == 5
+    assert np.isclose(np.sum(effect_A ** 2), 0.8)
+    assert np.isclose(np.sum(effect_A_par ** 2), 0.2)
+
+
 def test_trait_add_popstrat_adds_cluster_constant_component_after_join():
     pops = [
         psg.Population(N=4, M=5, p_init=0.3, seed=idx)

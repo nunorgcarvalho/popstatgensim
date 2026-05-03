@@ -5,6 +5,18 @@ import warnings
 import numpy as np
 
 
+def _normalize_effect_dist(dist: str) -> str:
+    '''
+    Normalizes effect-size distribution names used by public sampling helpers.
+    '''
+    dist = str(dist).lower()
+    if dist in {'constant', 'point_mass', 'pointmass'}:
+        return 'constant'
+    if dist == 'normal':
+        return dist
+    raise ValueError("dist must be either 'normal', 'constant', or 'point_mass'.")
+
+
 def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, dist: str = 'normal') -> tuple[np.ndarray, np.ndarray]:
     '''
     Generates variant effect sizes for some trait. Default interpretation is per-standardized-allele effect sizes. Non-causal variant effects are set to 0. Causal effects are drawn from a specified distribution (default is Normal).
@@ -14,25 +26,33 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
         var_G (float): Total expected variance contributed by per-standardized-allele genetic effects. Refers to direct genetic effects. Default is 1.0.
         dist (str): Distribution to draw causal effects from. Options are:
             - 'normal': Normal distribution (default).
-            - 'constant': All effect sizes are the same.
+            - 'constant' or 'point_mass': All causal effect sizes are the same.
     Returns:
         tuple ((causal_effects, j_causal)):
         Where:
         - causal_effects (1D array): Array of length M containing the effect sizes of all variants.
         - j_causal (1D array): Array of length M_causal containing the variant indices of causal variants.
     '''
+    dist = _normalize_effect_dist(dist)
     if M_causal is None:
         M_causal = M
+    if M_causal < 0 or M_causal > M:
+        raise ValueError('M_causal must be between 0 and M.')
+    if var_G < 0:
+        raise ValueError('var_G must be non-negative.')
+
     causal_effects = np.zeros(M)
     j_causal = np.random.choice(M, M_causal, replace=False)
-    if dist == 'normal':
-        causal_effects[j_causal] = np.random.normal(0, np.sqrt(var_G/M_causal), M_causal)
-    elif dist == 'constant':
-        causal_effects[j_causal] = np.sqrt(var_G/M_causal)
+    if M_causal > 0:
+        if dist == 'normal':
+            causal_effects[j_causal] = np.random.normal(0, np.sqrt(var_G/M_causal), M_causal)
+        elif dist == 'constant':
+            causal_effects[j_causal] = np.sqrt(var_G/M_causal)
     return (causal_effects, j_causal)
 
 def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
                              M: int, M_causal: int = None,
+                             dist: str = 'normal',
                              force_var: bool = False,
                              G: np.ndarray = None, G_std: np.ndarray = None,
                              G_par: np.ndarray = None, G_par_std: np.ndarray = None) -> dict:
@@ -48,6 +68,12 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
         r (float): Target correlation between the standardized causal effects for A and A_par.
         M (int): Total number of variants.
         M_causal (int): Number of shared causal variants. Default is all variants.
+        dist (str): Distribution to draw causal effects from. Options are:
+            - 'normal': Bivariate normal distribution (default).
+            - 'constant' or 'point_mass': All causal effect sizes are the same
+              within each genetic component. In this mode `r` controls only the
+              sign of `A_par`, because a point-mass pair cannot realize an
+              arbitrary cross-effect correlation.
         force_var (bool): Passed to both returned GeneticEffect objects.
         G (2D array): Optional offspring genotype matrix used to compute G_std for the A effect.
         G_std (1D array): Optional offspring genotype standard deviations for the A effect.
@@ -59,6 +85,8 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
         effects (dict): Dictionary with keys 'A' and 'A_par', each containing a GeneticEffect object.
     '''
     from .effects import GeneticEffect
+
+    dist = _normalize_effect_dist(dist)
 
     def _resolve_G_std(G_input: np.ndarray, G_std_input: np.ndarray, name: str) -> np.ndarray:
         if G_input is not None and G_std_input is not None:
@@ -95,13 +123,19 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
 
     if M_causal > 0:
         j_causal = np.random.choice(M, M_causal, replace=False)
-        cov = np.array([
-            [var_A / M_causal, r * np.sqrt(var_A * var_A_par) / M_causal],
-            [r * np.sqrt(var_A * var_A_par) / M_causal, var_A_par / M_causal],
-        ])
-        draws = np.random.multivariate_normal(mean=np.zeros(2), cov=cov, size=M_causal)
-        effects_A[j_causal] = draws[:, 0]
-        effects_A_par[j_causal] = draws[:, 1]
+        if dist == 'normal':
+            cov = np.array([
+                [var_A / M_causal, r * np.sqrt(var_A * var_A_par) / M_causal],
+                [r * np.sqrt(var_A * var_A_par) / M_causal, var_A_par / M_causal],
+            ])
+            draws = np.random.multivariate_normal(mean=np.zeros(2), cov=cov, size=M_causal)
+            effects_A[j_causal] = draws[:, 0]
+            effects_A_par[j_causal] = draws[:, 1]
+        elif dist == 'constant':
+            effects_A[j_causal] = np.sqrt(var_A / M_causal)
+            effects_A_par[j_causal] = np.sqrt(var_A_par / M_causal)
+            if r < 0:
+                effects_A_par[j_causal] *= -1.0
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
