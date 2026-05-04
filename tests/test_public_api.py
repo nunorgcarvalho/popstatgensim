@@ -7,6 +7,7 @@ import popstatgensim as psg
 
 def test_root_public_api_exposes_main_symbols():
     assert psg.Population.__name__ == "Population"
+    assert psg.PopulationParams.__name__ == "PopulationParams"
     assert psg.SuperPopulation.__name__ == "SuperPopulation"
     assert psg.Trait.__name__ == "Trait"
     assert psg.GeneticEffect.__name__ == "GeneticEffect"

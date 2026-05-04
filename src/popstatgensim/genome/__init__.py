@@ -10,6 +10,7 @@ from .structure import (
     draw_p_init,
     generate_LD_blocks,
     generate_chromosomes,
+    generate_recombination_rates,
 )
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "draw_binom_haplos",
     "generate_LD_blocks",
     "generate_chromosomes",
+    "generate_recombination_rates",
     "get_FST",
     "get_fixation_t",
     "summarize_ps",

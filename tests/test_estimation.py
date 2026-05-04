@@ -209,6 +209,6 @@ def test_run_eo_am_requires_at_least_two_chromosomes():
 
 def test_population_get_chrom_idx_uses_r_half_and_includes_zero():
     pop = psg.Population(N=4, M=6, p_init=0.3, seed=3)
-    pop.R = np.array([0.1, 0.5, 0.2, 0.5, 0.1, 0.1], dtype=float)
+    pop.set_params(R=np.array([0.1, 0.5, 0.2, 0.5, 0.1, 0.1], dtype=float))
 
     np.testing.assert_array_equal(pop.get_chrom_idx(), np.array([0, 1, 3], dtype=int))

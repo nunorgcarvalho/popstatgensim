@@ -242,7 +242,7 @@ class SuperPopulation:
         )
 
         # preserves shared genome metadata from the first population
-        new_pop.R = gen_pops[0].R.copy()
+        new_pop.params.R = gen_pops[0].params.R.copy()
         new_pop.BPs = gen_pops[0].BPs.copy()
         new_pop.t = gen_pops[0].t
         new_pop.T_breaks = copy.deepcopy(gen_pops[0].T_breaks)

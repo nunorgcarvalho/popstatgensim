@@ -4,11 +4,12 @@ from . import estimation, genome, io, pedigree, plotting, simulation, traits, ut
 from .estimation import run_EO_AM, run_HEreg, run_REML
 from .genome import PCAResult
 from .io import export_GRM_GCTA, export_trait, read_GRM_GCTA
-from .simulation import Population, SuperPopulation
+from .simulation import Population, PopulationParams, SuperPopulation
 from .traits import FixedEffect, GeneticEffect, NoiseEffect, RandomEffect, Trait
 
 __all__ = [
     "Population",
+    "PopulationParams",
     "SuperPopulation",
     "Trait",
     "GeneticEffect",

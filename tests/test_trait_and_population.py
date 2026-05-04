@@ -87,6 +87,7 @@ def test_fixed_effect_parent_trait_uses_zeros_when_past_generation_is_unavailabl
 
 def test_fixed_effect_can_use_parent_component_and_var_scaling():
     pop = psg.Population(N=6, M=5, p_init=0.3, seed=33, keep_past_generations=1)
+    pop.set_params(R_type="blocks")
     x = np.linspace(0.0, 1.0, pop.N)
     pop.add_trait(
         name="base",
@@ -677,6 +678,87 @@ def test_generate_offspring_rejects_unknown_offspring_distribution():
 
     with pytest.raises(ValueError, match="n_offspring_dist"):
         pop.generate_offspring(n_offspring_dist="unsupported")
+
+
+def test_population_params_store_R_without_pop_R_attribute():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=220)
+
+    assert isinstance(pop.params, psg.PopulationParams)
+    assert not hasattr(pop, "R")
+    assert pop.params.R_type == "indep"
+    np.testing.assert_allclose(pop.params.R, np.full(pop.M, 0.5))
+
+    pop.set_params(R=0.25)
+    assert pop.params.R_type == "custom"
+    np.testing.assert_allclose(pop.params.R, np.full(pop.M, 0.25))
+
+    new_R = np.linspace(0.1, 0.4, pop.M)
+    pop.set_params(R=new_R)
+    np.testing.assert_allclose(pop.params.R, new_R)
+
+
+def test_population_set_params_R_type_regenerates_R_from_genome_structure():
+    pop = psg.Population(N=6, M=5, p_init=0.3, seed=222)
+
+    pop.set_params(R_type="uniform")
+    assert pop.params.R_type == "uniform"
+    np.testing.assert_allclose(
+        pop.params.R,
+        psg.genome.generate_recombination_rates(pop.M, R_type="uniform"),
+    )
+
+    pop.set_params(R_type="indep")
+    np.testing.assert_allclose(pop.params.R, np.full(pop.M, 0.5))
+
+
+def test_population_init_rejects_R_type_argument():
+    with pytest.raises(TypeError):
+        psg.Population(N=6, M=4, p_init=0.3, R_type="blocks")
+
+
+def test_simulate_generations_uses_params_with_temporary_overrides(monkeypatch):
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=221, keep_past_generations=1)
+    pop.set_params(
+        related_offspring=False,
+        s=0.2,
+        mu=0.3,
+        n_offspring_dist="constant",
+    )
+
+    calls = []
+
+    def fake_next_generation(s, mu):
+        calls.append(("next", s, mu))
+        return pop.H.copy()
+
+    monkeypatch.setattr(pop, "next_generation", fake_next_generation)
+    pop.simulate_generations(generations=1, trait_updates=False)
+
+    assert calls == [("next", 0.2, 0.3)]
+
+    def fake_generate_offspring(s, mu, R, n_offspring_dist, AM_r, AM_trait, AM_type):
+        calls.append(("offspring", s, mu, R.copy(), n_offspring_dist, AM_r, AM_trait, AM_type))
+        relations = {
+            key: value.copy() if isinstance(value, np.ndarray) else value
+            for key, value in pop.relations.items()
+        }
+        return (pop.H.copy(), relations, None)
+
+    monkeypatch.setattr(pop, "generate_offspring", fake_generate_offspring)
+    pop.simulate_generations(
+        generations=1,
+        related_offspring=True,
+        mu=0.0,
+        n_offspring_dist="poisson",
+        trait_updates=False,
+    )
+
+    assert calls[1][0] == "offspring"
+    assert calls[1][2] == 0.0
+    assert calls[1][4] == "poisson"
+    assert pop.params.related_offspring is False
+    assert pop.params.mu == 0.3
+    assert pop.params.n_offspring_dist == "constant"
 
 
 def test_constant_offspring_distribution_balances_noninteger_expected_counts():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import warnings
+from dataclasses import dataclass, fields
 from typing import Optional, Union
 
 import matplotlib.pyplot as plt
@@ -28,6 +29,25 @@ from ..utils import misc as misc_utils
 from ..utils import stats as stats_utils
 
 
+_PARAM_UNSET = object()
+
+
+@dataclass
+class PopulationParams:
+    '''
+    Parameters controlling how a Population evolves in future simulations.
+    '''
+    R_type: str = 'indep'
+    R: Optional[np.ndarray] = None
+    related_offspring: bool = True
+    s: Union[float, np.ndarray] = 0.0
+    mu: Union[float, np.ndarray] = 0.0
+    n_offspring_dist: str = 'poisson'
+    AM_r: float = 0.0
+    AM_trait: Union[str, np.ndarray, None] = None
+    AM_type: str = 'phenotypic'
+
+
 class Population:
     '''
     Class for a population to simulate. Contains genotype information. Contains methods to simulate change in population over time.
@@ -39,7 +59,6 @@ class Population:
 
     def __init__(self, N: int, M: int, P: int = 2,
                  p_init: Union[float, np.ndarray] = None,
-                 R_type: str = 'blocks',
                  keep_past_generations: int = 1,
                  track_pedigree: bool = False,
                  track_haplotypes: bool = False,
@@ -53,7 +72,6 @@ class Population:
             M (int): Total number of variants in genome.
             P (int): Ploidy of genotpes. Default is 2 (diploid).
             p_init (float or array): Initial allele frequency of variants. If only a single value is provided, it is treated as the initial allele frequency for all variants. Alternatively, can be an array of length M for variant-specfic allele frequencies. If not provided, default is uniform distribution of allele frequencies between 0.05 and 0.95.
-            R_type (str). Type of genome structure to use. Options are: 'blocks' (default) for LD blocks, 'indep' for independent sites, or 'uniform' for uniform recombination rates across the genome. Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
             track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
@@ -78,7 +96,6 @@ class Population:
         # passes haplotype to base constructor for further initialization
         self._initialize_H(
             H,
-            R_type=R_type,
             keep_past_generations=keep_past_generations,
             track_pedigree=track_pedigree,
             track_haplotypes=track_haplotypes,
@@ -87,7 +104,7 @@ class Population:
         )
     
     @classmethod
-    def from_H(cls, H: np.ndarray, R_type: str = 'blocks',
+    def from_H(cls, H: np.ndarray,
                keep_past_generations: int = 1,
                track_pedigree: bool = False,
                track_haplotypes: bool = False,
@@ -97,7 +114,6 @@ class Population:
         Initializes a population from a given haplotype array.
         Parameters:
             H (3D array): N*M*P array of haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
-            R_type (str). Type of genome structure to use. Options are: 'blocks' (default) for LD blocks, 'indep' for independent sites, or 'uniform' for uniform recombination rates across the genome. Resulting recombination rate array is stored in Population.R.
             keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
             track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
             track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
@@ -111,7 +127,6 @@ class Population:
         # initializes the object with the given haplotype array
         pop._initialize_H(
             H,
-            R_type=R_type,
             keep_past_generations=keep_past_generations,
             track_pedigree=track_pedigree,
             track_haplotypes=track_haplotypes,
@@ -120,7 +135,7 @@ class Population:
         )
         return pop
 
-    def _initialize_H(self, H: np.ndarray, R_type: str = 'blocks',
+    def _initialize_H(self, H: np.ndarray,
                       keep_past_generations: int = 1,
                       track_pedigree: bool = False,
                       track_haplotypes: bool = False,
@@ -131,6 +146,7 @@ class Population:
         '''
         # sets basic population attributes from haplotype array
         (self.N, self.M, self.P) = H.shape
+        self.params = PopulationParams()
 
         # initializes default/initial attributes
         self.t = 0 # generation
@@ -144,13 +160,7 @@ class Population:
         self._GRM_cache = {}
         self._DGRM_cache = {}
         self._X_dtype = np.float32
-        # recombination rates
-        if R_type == 'blocks':
-            self.R = genome_structure.generate_LD_blocks(self.M)
-        elif R_type == 'indep':
-            self.make_sites_indep()
-        elif R_type == 'uniform':
-            self.R = genome_structure.generate_chromosomes(self.M, chrs=1, meioses_per_chr=1)
+        self.params.R = self._generate_R_from_type(self.params.R_type)
         self.K = np.diag(np.ones(self.N)) # kinship matrix (initially identity, not functional yet)
         self.track_pedigree = track_pedigree # whether to track pedigree information
         self.track_haplotypes = bool(track_haplotypes)
@@ -193,12 +203,123 @@ class Population:
         self.keep_past_generations = keep_past_generations
 
 
-    def make_sites_indep(self):
+    def _validate_R(self, R: Union[float, np.ndarray]) -> np.ndarray:
         '''
-        Changes the recombination rates to make all sites independent.
+        Validates and returns a recombination-rate vector matching Population.M.
         '''
-        self.R = 0.5 * np.ones(self.M)
-        self._DGRM_cache = {}
+        if isinstance(R, (float, int, np.floating, np.integer)):
+            R = np.full(self.M, float(R), dtype=float)
+        else:
+            R = np.asarray(R, dtype=float)
+        if R.ndim != 1:
+            raise ValueError('Population parameter `R` must be a 1D array or scalar.')
+        if R.shape[0] != self.M:
+            raise ValueError('Population parameter `R` must have length M.')
+        if not np.all(np.isfinite(R)):
+            raise ValueError('Population parameter `R` must contain finite values.')
+        if np.any(R < 0.0):
+            raise ValueError('Population parameter `R` must contain non-negative values.')
+        return R.copy()
+
+    def _generate_R_from_type(self, R_type: str) -> np.ndarray:
+        return self._validate_R(genome_structure.generate_recombination_rates(self.M, R_type=R_type))
+
+    def _copy_param_value(self, value):
+        return value.copy() if isinstance(value, np.ndarray) else copy.deepcopy(value)
+
+    def _set_param_value(self, params: PopulationParams, name: str, value,
+                         update_r_type_for_R: bool = True):
+        if name == 'R_type':
+            R_type = str(value).strip().lower()
+            if R_type == 'custom':
+                if params.R is None:
+                    raise ValueError("Population parameter `R_type='custom'` requires `R` to be set.")
+                params.R_type = R_type
+                return
+            R = self._generate_R_from_type(R_type)
+            params.R_type = R_type
+            params.R = R
+            self._DGRM_cache = {}
+        elif name == 'R':
+            if value is None:
+                if self.params.R is None:
+                    raise ValueError('Population parameter `R` cannot be None.')
+                params.R = self.params.R.copy()
+                return
+            params.R = self._validate_R(value)
+            if update_r_type_for_R:
+                params.R_type = 'custom'
+            self._DGRM_cache = {}
+        elif name == 'related_offspring':
+            params.related_offspring = bool(value)
+        elif name == 'AM_r':
+            value = float(value)
+            if abs(value) > 1:
+                raise ValueError('Population parameter `AM_r` must be between -1 and 1.')
+            params.AM_r = value
+        elif name == 'n_offspring_dist':
+            params.n_offspring_dist = str(value).strip().lower()
+        elif name == 'AM_type':
+            params.AM_type = str(value)
+        elif name in {'s', 'mu', 'AM_trait'}:
+            setattr(params, name, self._copy_param_value(value))
+        else:
+            raise ValueError(f'Unknown population parameter: {name}.')
+
+    def set_params(self, params: Union[PopulationParams, dict] = None,
+                   **kwargs) -> PopulationParams:
+        '''
+        Permanently updates parameters controlling future population simulations.
+        Parameters:
+            params (PopulationParams or dict): Optional parameter object or dictionary
+                whose values are applied before keyword arguments.
+            **kwargs: Population parameter values to update.
+        Returns:
+            PopulationParams: The updated parameter object stored on this Population.
+        '''
+        if params is not None:
+            if isinstance(params, PopulationParams):
+                for field in fields(PopulationParams):
+                    self._set_param_value(
+                        self.params,
+                        field.name,
+                        self._copy_param_value(getattr(params, field.name)),
+                        update_r_type_for_R=False,
+                    )
+            elif isinstance(params, dict):
+                for name, value in params.items():
+                    self._set_param_value(self.params, name, value)
+            else:
+                raise ValueError('`params` must be a PopulationParams object or dictionary.')
+
+        valid_names = {field.name for field in fields(PopulationParams)}
+        for name, value in kwargs.items():
+            if name not in valid_names:
+                raise ValueError(f'Unknown population parameter: {name}.')
+            self._set_param_value(self.params, name, value)
+        return self.params
+
+    def _resolved_params(self, params: Union[PopulationParams, dict] = None,
+                         overrides: dict = None) -> PopulationParams:
+        resolved = copy.deepcopy(self.params)
+        if params is not None:
+            if isinstance(params, PopulationParams):
+                for field in fields(PopulationParams):
+                    self._set_param_value(
+                        resolved,
+                        field.name,
+                        self._copy_param_value(getattr(params, field.name)),
+                        update_r_type_for_R=False,
+                    )
+            elif isinstance(params, dict):
+                for name, value in params.items():
+                    self._set_param_value(resolved, name, value)
+            else:
+                raise ValueError('`params` must be a PopulationParams object or dictionary.')
+        if overrides:
+            for name, value in overrides.items():
+                self._set_param_value(resolved, name, value)
+        return resolved
 
     def set_founding_haplotypes(self):
         '''
@@ -376,7 +497,7 @@ class Population:
             if chrom_idx.size < 2:
                 raise ValueError(
                     "The between-chromosome DGRM requires at least two chromosomes. "
-                    "Update `Population.R` so `get_chrom_idx()` identifies multiple chromosomes."
+                    "Update `Population.params.R` so `get_chrom_idx()` identifies multiple chromosomes."
                 )
 
             chrom_end = np.concatenate([chrom_idx[1:], np.array([M], dtype=int)])
@@ -412,14 +533,14 @@ class Population:
         '''
         Returns ascending chromosome start indices inferred from recombination rates.
 
-        Chromosome starts are defined as variant positions where ``Population.R``
+        Chromosome starts are defined as variant positions where ``Population.params.R``
         is exactly ``0.5``, with index 0 always included.
         '''
-        R = np.asarray(self.R, dtype=float)
+        R = np.asarray(self.params.R, dtype=float)
         if R.ndim != 1:
-            raise ValueError('Population.R must be a 1D array.')
+            raise ValueError('Population.params.R must be a 1D array.')
         if R.shape[0] != self.M:
-            raise ValueError('Population.R must have length M.')
+            raise ValueError('Population.params.R must have length M.')
 
         chrom_idx = np.flatnonzero(R == 0.5)
         chrom_idx = np.unique(np.concatenate([np.array([0], dtype=int), chrom_idx]))
@@ -597,7 +718,7 @@ class Population:
             metric_last_k=self.metric_last_k,
         )
 
-        new_pop.R = self.R.copy()
+        new_pop.params.R = self.params.R.copy()
         new_pop.BPs = self.BPs.copy()
         new_pop.t = self.t
         new_pop.T_breaks = copy.deepcopy(self.T_breaks)
@@ -1069,8 +1190,8 @@ class Population:
     #### Simulating forward in time ####
     ####################################
         
-    def next_generation(self, s: Union[float, np.ndarray] = 0.0,
-                        mu: Union[float, np.ndarray] = 0.0) -> np.ndarray:
+    def next_generation(self, s: Union[float, np.ndarray] = _PARAM_UNSET,
+                        mu: Union[float, np.ndarray] = _PARAM_UNSET) -> np.ndarray:
         '''
         Simulates new generation. Doesn't simulate offspring directly, meaning that future offspring have haplotypes drawn randomly from allele frequencies. Automatically updates object.
 
@@ -1080,6 +1201,10 @@ class Population:
         Returns:
             H (3D array): N*M*P array of next generation's haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
         '''
+        if s is _PARAM_UNSET:
+            s = self.params.s
+        if mu is _PARAM_UNSET:
+            mu = self.params.mu
         # assigns same selection coefficient/mutation rate to all variants if only single value specified
         if isinstance(s, (float, int)):
             s = np.full(self.M, s)
@@ -1096,25 +1221,40 @@ class Population:
 
         return H
 
-    def simulate_generations(self, generations: int = 1, related_offspring: bool = True,
+    def simulate_generations(self, generations: int = 1, related_offspring: bool = None,
                              trait_updates: bool = False, verbose: bool = False,
-                             n_offspring_dist: str = 'poisson', **kwargs):
+                             n_offspring_dist: str = None,
+                             params: Union[PopulationParams, dict] = None,
+                             **kwargs):
         '''
-        Simulates specified number of generations beyond current generation. Can simulate offspring directly. Automatically updates object. Recombination rates are extracted from object attributes.
+        Simulates specified number of generations beyond current generation. Can simulate offspring directly. Automatically updates object. Recombination rates are extracted from population parameters.
 
         Parameters:
             generations (int): Number of generations to simulate (beyond the current generation). Default is 1.
-            related_offspring (bool): Whether the offspring of the next generation should be directly related to parents from previous generation by simulating meiosis and haplotype transfer. Default is True. If false, future offspring have alleles drawn randomly from allele frequencies.
+            related_offspring (bool): Optional one-run override for
+                `Population.params.related_offspring`. If false, future offspring
+                have alleles drawn randomly from allele frequencies.
             trait_updates (bool): Whether to update traits after each generation. However, sex is always updated in each generation, regardless of this setting. Default is False, meaning that traits are only updated at the end of the simulation.
             verbose (bool): Whether to print a progress message after each simulated generation. Default is False.
-            n_offspring_dist (str): Distribution of offspring counts across mate pairs
-                when `related_offspring=True`. Supported values are 'poisson'
-                (default) and 'constant'. Ignored when `related_offspring=False`.
-            **kwargs: All other arguments are passed to the `next_generation` or
-                `generate_offspring` methods. See those methods for details.
+            n_offspring_dist (str): Optional one-run override for
+                `Population.params.n_offspring_dist`. Ignored when
+                `related_offspring=False`.
+            params (PopulationParams or dict): Optional complete parameter set used
+                only for this simulation run.
+            **kwargs: One-run population-parameter overrides such as `s`, `mu`,
+                `R`, `AM_r`, `AM_trait`, and `AM_type`.
         '''
-        am_kwargs = {'AM_r', 'AM_trait', 'AM_type'}
-        if generations > 1 and not trait_updates and any(key in kwargs for key in am_kwargs):
+        overrides = dict(kwargs)
+        if related_offspring is not None:
+            overrides['related_offspring'] = related_offspring
+        if n_offspring_dist is not None:
+            overrides['n_offspring_dist'] = n_offspring_dist
+        sim_params = self._resolved_params(params=params, overrides=overrides)
+
+        uses_assortative_mating = (
+            sim_params.AM_trait is not None and not np.isclose(sim_params.AM_r, 0.0)
+        )
+        if generations > 1 and not trait_updates and uses_assortative_mating:
             raise ValueError(
                 'Assortative mating can only be simulated if traits are updated for each generation. '
                 'Set trait_updates=True when passing AM-related arguments.'
@@ -1143,13 +1283,18 @@ class Population:
         
         # loops through each generation
         for t in range(generations):
-            if related_offspring:
+            if sim_params.related_offspring:
                 (H, relations, Haplos) = self.generate_offspring(
-                    n_offspring_dist=n_offspring_dist,
-                    **kwargs,
+                    s=sim_params.s,
+                    mu=sim_params.mu,
+                    R=sim_params.R,
+                    n_offspring_dist=sim_params.n_offspring_dist,
+                    AM_r=sim_params.AM_r,
+                    AM_trait=sim_params.AM_trait,
+                    AM_type=sim_params.AM_type,
                 )
             else:
-                H = self.next_generation(**kwargs)
+                H = self.next_generation(s=sim_params.s, mu=sim_params.mu)
                 Haplos = None
                 if self.track_haplotypes:
                     Haplos = np.full(H.shape, -1, dtype=np.int32)
@@ -1517,9 +1662,13 @@ class Population:
             **diagnostics,
         }
 
-    def generate_offspring(self, s: Union[float, np.ndarray] = 0,
-                           mu: Union[float, np.ndarray] = 0,
-                           n_offspring_dist: str = 'poisson',
+    def generate_offspring(self, s: Union[float, np.ndarray] = _PARAM_UNSET,
+                           mu: Union[float, np.ndarray] = _PARAM_UNSET,
+                           n_offspring_dist: str = _PARAM_UNSET,
+                           R: Union[float, np.ndarray] = _PARAM_UNSET,
+                           AM_r: float = _PARAM_UNSET,
+                           AM_trait: Union[str, np.ndarray] = _PARAM_UNSET,
+                           AM_type: str = _PARAM_UNSET,
                            **kwargs) -> np.ndarray:
         '''
         Pairs up mates and generates offspring from parents' haplotypes. Only works
@@ -1541,13 +1690,37 @@ class Population:
             H (3D array): N*M*P array of offspring haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
             relations (dict): Dictionary containing relationship matrices for the current generation, including 'spouses' and 'parents'.
         '''
+        if kwargs:
+            unknown = ', '.join(sorted(kwargs))
+            raise ValueError(f'Unknown population parameter(s): {unknown}.')
+        if s is _PARAM_UNSET:
+            s = self.params.s
+        if mu is _PARAM_UNSET:
+            mu = self.params.mu
+        if n_offspring_dist is _PARAM_UNSET:
+            n_offspring_dist = self.params.n_offspring_dist
+        if R is _PARAM_UNSET:
+            R = self.params.R
+        else:
+            R = self._validate_R(R)
+        if AM_r is _PARAM_UNSET:
+            AM_r = self.params.AM_r
+        if AM_trait is _PARAM_UNSET:
+            AM_trait = self.params.AM_trait
+        if AM_type is _PARAM_UNSET:
+            AM_type = self.params.AM_type
+
         # checks ploidy
         if self.P != 2:
             raise Exception('Offspring generation only works for diploids.')
 
         # Assortative Mating ####        
         # pairs up mates
-        (iMs, iPs), spouse_idx = self._pair_mates(**kwargs)
+        (iMs, iPs), spouse_idx = self._pair_mates(
+            AM_r=AM_r,
+            AM_trait=AM_trait,
+            AM_type=AM_type,
+        )
 
         # Selection ####
         if isinstance(s, (float, int)):
@@ -1578,7 +1751,7 @@ class Population:
 
         # Drift + Recombination ####
         # generates variants for which a crossover event happens for each parent of each offspring
-        crossover_events = np.random.binomial(n=1, p=self.R.reshape(1, self.M, 1),
+        crossover_events = np.random.binomial(n=1, p=R.reshape(1, self.M, 1),
                                               size=(N_offspring, self.M, 2)).astype(bool)
         # determines the shift in haplotype phase for each parent's haplotype at each variant
         haplo_phase = np.logical_xor.accumulate(crossover_events, axis=1)
