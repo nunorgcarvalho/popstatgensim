@@ -16,6 +16,10 @@ def test_root_public_api_exposes_main_symbols():
     assert callable(psg.run_HEreg)
     assert callable(psg.run_REML)
     assert callable(psg.read_GRM_GCTA)
+    assert callable(psg.read_table_GCTA)
+    assert callable(psg.align_samples)
+    assert callable(psg.subset_grm_by_ids)
+    assert callable(psg.prepare_reml_inputs)
     assert not hasattr(psg, "run_HE_regression")
 
 
