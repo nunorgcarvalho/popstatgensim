@@ -260,6 +260,103 @@ def test_trait_add_popstrat_adds_cluster_constant_component_after_join():
     np.testing.assert_allclose(trait.y, base_component)
 
 
+def test_join_populations_can_randomly_sample_Ns_before_joining():
+    pops = [
+        psg.Population(N=6, M=5, p_init=0.3, seed=idx)
+        for idx in range(3)
+    ]
+    spop = psg.SuperPopulation(pops)
+    spop.add_subpop_trait()
+
+    np.random.seed(12)
+    spop.join_populations(Ns=[2, 4, 2])
+
+    joined = spop.pops[-1]
+    assert joined.N == 8
+    assert spop.active == [False, False, False, True]
+    subpop = joined.traits["subpop"].y.astype(int)
+    np.testing.assert_array_equal(
+        np.bincount(subpop, minlength=3),
+        np.array([2, 4, 2]),
+    )
+
+
+def test_join_populations_rejects_odd_Ns_total():
+    spop = psg.SuperPopulation([
+        psg.Population(N=5, M=4, p_init=0.3, seed=1),
+        psg.Population(N=5, M=4, p_init=0.3, seed=2),
+    ])
+
+    with pytest.raises(ValueError, match="even"):
+        spop.join_populations(Ns=[2, 3])
+
+
+def test_join_populations_rejects_odd_N_new():
+    spop = psg.SuperPopulation([
+        psg.Population(N=5, M=4, p_init=0.3, seed=1),
+        psg.Population(N=5, M=4, p_init=0.3, seed=2),
+    ])
+
+    with pytest.raises(ValueError, match="even"):
+        spop.join_populations(N_new=5, admix_fractions=[0.4, 0.6])
+
+
+def test_join_populations_can_sample_by_admix_fractions():
+    pops = [
+        psg.Population(N=8, M=5, p_init=0.3, seed=idx)
+        for idx in range(3)
+    ]
+    spop = psg.SuperPopulation(pops)
+    spop.add_subpop_trait()
+
+    np.random.seed(13)
+    spop.join_populations(
+        N_new=10,
+        admix_fractions=[0.2, 0.5, 0.3],
+    )
+
+    joined = spop.pops[-1]
+    assert joined.N == 10
+    subpop = joined.traits["subpop"].y.astype(int)
+    np.testing.assert_array_equal(
+        np.bincount(subpop, minlength=3),
+        np.array([2, 5, 3]),
+    )
+
+
+def test_join_populations_requires_admix_arguments_together():
+    spop = psg.SuperPopulation([
+        psg.Population(N=5, M=4, p_init=0.3, seed=1),
+        psg.Population(N=5, M=4, p_init=0.3, seed=2),
+    ])
+
+    with pytest.raises(ValueError, match="provided together"):
+        spop.join_populations(N_new=4)
+
+    with pytest.raises(ValueError, match="provided together"):
+        spop.join_populations(admix_fractions=[0.5, 0.5])
+
+
+def test_join_populations_rejects_Ns_with_admix_arguments():
+    spop = psg.SuperPopulation([
+        psg.Population(N=5, M=4, p_init=0.3, seed=1),
+        psg.Population(N=5, M=4, p_init=0.3, seed=2),
+    ])
+
+    with pytest.raises(ValueError, match="cannot be used"):
+        spop.join_populations(Ns=[2, 2], N_new=4, admix_fractions=[0.5, 0.5])
+
+
+def test_join_populations_rejects_admix_request_larger_than_source_population():
+    spop = psg.SuperPopulation([
+        psg.Population(N=2, M=4, p_init=0.3, seed=1),
+        psg.Population(N=8, M=4, p_init=0.3, seed=2),
+    ])
+
+    with pytest.raises(ValueError, match="only contains"):
+        spop.join_populations(N_new=8, admix_fractions=[0.5, 0.5])
+
+
 def test_add_popstrat_requires_more_than_one_populated_subpopulation():
     pop = psg.Population(N=6, M=4, p_init=0.3, seed=21)
     spop = psg.SuperPopulation([pop])
@@ -286,6 +383,22 @@ def test_superpopulation_from_FST_builds_subpops_and_adds_subpop_trait():
         assert pop.M == len(p0)
         assert "subpop" in pop.traits
         np.testing.assert_array_equal(pop.traits["subpop"].y, np.full(pop.N, idx))
+
+
+def test_add_subpop_trait_can_override_existing_subpop_trait():
+    pop = psg.Population(N=4, M=5, p_init=0.3, seed=41)
+    pop.add_trait_from_fixed_values(
+        name="subpop",
+        y=np.full(pop.N, 99, dtype=int),
+        trait_type="permanent",
+    )
+    spop = psg.SuperPopulation([pop])
+
+    spop.add_subpop_trait()
+    np.testing.assert_array_equal(pop.traits["subpop"].y, np.full(pop.N, 99))
+
+    spop.add_subpop_trait(override=True)
+    np.testing.assert_array_equal(pop.traits["subpop"].y, np.zeros(pop.N, dtype=int))
 
 
 def test_superpopulation_from_FST_accepts_per_population_FST_with_warning():

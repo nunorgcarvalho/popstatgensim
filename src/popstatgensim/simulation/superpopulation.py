@@ -363,18 +363,128 @@ class SuperPopulation:
 
         return new_pop
 
+    def _validate_join_counts(self, pops: list, counts: Union[list, np.ndarray],
+                              name: str) -> list:
+        '''
+        Validates per-population sample sizes used before joining populations.
+        '''
+        counts_arr = np.asarray(counts)
+        if counts_arr.ndim != 1:
+            raise ValueError(f'`{name}` must be a 1D list or array.')
+        if counts_arr.shape[0] != len(pops):
+            raise ValueError(f'Length of `{name}` must match the number of selected populations.')
+        try:
+            counts_float = counts_arr.astype(float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'`{name}` must contain numeric sample sizes.') from exc
+        if not np.all(np.isfinite(counts_float)):
+            raise ValueError(f'`{name}` must contain finite values.')
+        if not np.allclose(counts_float, np.round(counts_float)):
+            raise ValueError(f'`{name}` must contain integer sample sizes.')
+
+        counts_arr = np.round(counts_float).astype(int)
+        if np.any(counts_arr <= 0):
+            raise ValueError(f'`{name}` must contain positive sample sizes.')
+        if int(counts_arr.sum()) % 2 != 0:
+            raise ValueError('Joined population size must be even.')
+        for i, (pop, count) in enumerate(zip(pops, counts_arr)):
+            if count > pop.N:
+                raise ValueError(
+                    f'Requested {count} individuals from selected population {i}, '
+                    f'but it only contains {pop.N}.'
+                )
+        return counts_arr.tolist()
+
+    def _resolve_join_admix_counts(self, pops: list, N_new: int,
+                                   admix_fractions: list) -> list:
+        '''
+        Converts admixture fractions to integer sample sizes using largest remainders.
+        '''
+        if not isinstance(N_new, (int, np.integer)):
+            raise ValueError('`N_new` must be an integer.')
+        N_new = int(N_new)
+        if N_new <= 0:
+            raise ValueError('`N_new` must be positive.')
+        if N_new % 2 != 0:
+            raise ValueError('Joined population size must be even.')
+
+        fractions = np.asarray(admix_fractions, dtype=float)
+        if fractions.ndim != 1:
+            raise ValueError('`admix_fractions` must be a 1D list or array.')
+        if fractions.shape[0] != len(pops):
+            raise ValueError('Length of `admix_fractions` must match the number of selected populations.')
+        if not np.all(np.isfinite(fractions)):
+            raise ValueError('`admix_fractions` must contain finite values.')
+        if np.any(fractions <= 0):
+            raise ValueError('`admix_fractions` must contain positive values.')
+        if not np.isclose(fractions.sum(), 1.0):
+            raise ValueError('`admix_fractions` must add up to 1.')
+
+        raw_counts = N_new * fractions
+        counts = np.floor(raw_counts).astype(int)
+        remainder = N_new - int(counts.sum())
+        if remainder > 0:
+            fractional_order = np.argsort(-(raw_counts - counts))
+            counts[fractional_order[:remainder]] += 1
+
+        if np.any(counts <= 0):
+            raise ValueError('`N_new` is too small for every selected population to contribute.')
+        return self._validate_join_counts(pops, counts, 'admix-derived counts')
+
+    def _sample_join_populations(self, pops: list, counts: list,
+                                 keep_past_generations: int) -> list:
+        '''
+        Randomly samples individuals from each source population before joining.
+        '''
+        sampled_pops = []
+        for pop, count in zip(pops, counts):
+            i_keep = np.random.choice(pop.N, size=count, replace=False)
+            sampled_pops.append(
+                pop.subset_individuals(
+                    i_keep,
+                    keep_past_generations=keep_past_generations,
+                )
+            )
+        return sampled_pops
+
     def join_populations(self, pop_i: list = None, shared_haplotypes: bool = False,
-                         keep_past_generations: int = 0):
+                         keep_past_generations: int = 0,
+                         Ns: list = None,
+                         N_new: int = None,
+                         admix_fractions: list = None):
         '''
         Joins multiple populations into a single population. Inactivates the original populations and creates a new population from the merged haplotypes. The new population is added to the superpopulation as an active population.
         Parameters:
             pop_i (list): List of indices of populations to join. If None, joins all active populations.
             shared_haplotypes (bool): Whether haplotype IDs already refer to the same underlying founders across populations. If False, each population's non-negative haplotype IDs are shifted to remain unique after joining. Default is False.
             keep_past_generations (int): Number of previous generations to preserve in the joined population. If greater than 0, the specified populations' stored past generations are recursively joined and attached to the new population's `past` attribute.
+            Ns (list): Optional per-population sample sizes. If provided, each selected source population is randomly subset to the corresponding size before joining. The sum must be even.
+            N_new (int): Optional total size of a newly admixed joined population. Must be provided together with `admix_fractions`, and cannot be used with `Ns`.
+            admix_fractions (list): Optional per-population admixture fractions. Must have the same length as `pop_i` and add up to 1. Fractions are converted to integer counts that sum to `N_new`.
         '''
-        if pop_i is None:
-            pop_i = list(self.active_i)
+        pop_i = self._resolve_population_indices(pop_i)
         pops = [self.pops[i] for i in pop_i]
+
+        if Ns is not None and (N_new is not None or admix_fractions is not None):
+            raise ValueError('`Ns` cannot be used together with `N_new` or `admix_fractions`.')
+        if (N_new is None) != (admix_fractions is None):
+            raise ValueError('`N_new` and `admix_fractions` must be provided together.')
+
+        if Ns is not None:
+            counts = self._validate_join_counts(pops, Ns, 'Ns')
+            pops = self._sample_join_populations(
+                pops,
+                counts,
+                keep_past_generations=keep_past_generations,
+            )
+        elif N_new is not None:
+            counts = self._resolve_join_admix_counts(pops, N_new, admix_fractions)
+            pops = self._sample_join_populations(
+                pops,
+                counts,
+                keep_past_generations=keep_past_generations,
+            )
+
         new_pop = self._join_populations_build(
             pops,
             shared_haplotypes=shared_haplotypes,
@@ -490,16 +600,21 @@ class SuperPopulation:
             pop_kwargs = misc_utils.get_pop_kwargs(i, **kwargs)
             pop.add_trait(name=name, effects=effects, **pop_kwargs)
 
-    def add_subpop_trait(self, pop_i: Union[int, list] = None):
+    def add_subpop_trait(self, pop_i: Union[int, list] = None,
+                         override: bool = False):
         '''
         Adds a permanent trait named `subpop` to selected populations in the
         superpopulation. Each individual receives the index of that population in the
-        superpopulation's `pops` list. Existing `subpop` traits are left unchanged.
+        superpopulation's `pops` list.
+        Parameters:
+            pop_i (int or list): Population indices to annotate. Defaults to all active populations.
+            override (bool): If False, existing `subpop` traits are left unchanged.
+                If True, existing `subpop` traits are replaced. Default is False.
         '''
         pop_indices = self._resolve_population_indices(pop_i)
         for idx in pop_indices:
             pop = self.pops[idx]
-            if 'subpop' in pop.traits:
+            if 'subpop' in pop.traits and not override:
                 continue
             y = np.full(pop.N, idx, dtype=int)
             pop.add_trait_from_fixed_values(name='subpop', y=y, trait_type='permanent')
