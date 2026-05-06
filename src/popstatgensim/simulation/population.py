@@ -266,15 +266,16 @@ class Population:
         else:
             raise ValueError(f'Unknown population parameter: {name}.')
 
-    def set_params(self, params: Union[PopulationParams, dict] = None,
+    def set_params(self, params: Union[PopulationParams, dict] = None, return_params: bool = False,
                    **kwargs) -> PopulationParams:
         '''
         Permanently updates parameters controlling future population simulations.
         Parameters:
             params (PopulationParams or dict): Optional parameter object or dictionary
                 whose values are applied before keyword arguments.
+            return_params (bool): Whether to return the updated parameter object after applying the updates. Default is False.
             **kwargs: Population parameter values to update.
-        Returns:
+        Returns (if `return_params=True`):
             PopulationParams: The updated parameter object stored on this Population.
         '''
         if params is not None:
@@ -297,7 +298,8 @@ class Population:
             if name not in valid_names:
                 raise ValueError(f'Unknown population parameter: {name}.')
             self._set_param_value(self.params, name, value)
-        return self.params
+        if return_params:
+            return self.params
 
     def _resolved_params(self, params: Union[PopulationParams, dict] = None,
                          overrides: dict = None) -> PopulationParams:

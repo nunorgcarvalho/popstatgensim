@@ -129,12 +129,15 @@ def test_read_table_gcta_rejects_duplicate_iids(tmp_path):
         psg.io.read_table_GCTA(path)
 
 
-def test_read_table_gcta_rejects_missing_values(tmp_path):
+def test_read_table_gcta_drops_missing_values_with_warning(tmp_path):
     path = tmp_path / 'missing.txt'
-    path.write_text('fam1 iid1 -9\nfam2 iid2 2\n', encoding='utf-8')
+    path.write_text('fam1 iid1 -9\nfam2 iid2 2\nfam3 iid3 4\n', encoding='utf-8')
 
-    with pytest.raises(ValueError, match='missing values'):
-        psg.io.read_table_GCTA(path)
+    with pytest.warns(UserWarning, match='Removed 1 sample'):
+        observed = psg.io.read_table_GCTA(path)
+
+    np.testing.assert_array_equal(observed['iid'], np.array(['iid2', 'iid3']))
+    np.testing.assert_array_equal(observed['values'], np.array([[2.0], [4.0]]))
 
 
 def test_subset_grm_by_ids_reorders_matrix():
@@ -237,19 +240,28 @@ def test_prepare_reml_inputs_aligns_by_default():
     np.testing.assert_array_equal(observed['Rs'], grm[np.ix_([1, 0], [1, 0])])
 
 
-def test_prepare_reml_inputs_can_skip_alignment():
-    y = np.array([10.0, 20.0])
-    X = np.array([[1.0], [2.0]])
-    grm = np.array([[1.0, 0.5], [0.5, 1.0]])
+def test_prepare_reml_inputs_preserves_matching_order_when_ids_match():
+    y = np.array([10.0, 20.0, 30.0])
+    ids = np.array(['iid1', 'iid2', 'iid3'])
+    X = np.array([[1.0], [2.0], [3.0]])
+    grm = np.array(
+        [
+            [1.0, 0.2, 0.1],
+            [0.2, 1.0, 0.3],
+            [0.1, 0.3, 1.0],
+        ]
+    )
 
     observed = psg.io.prepare_reml_inputs(
         y=y,
+        y_ids=ids,
         X=X,
+        X_ids=ids,
         Rs=grm,
-        already_aligned=True,
+        R_ids=ids,
     )
 
-    np.testing.assert_array_equal(observed['iid'], np.array(['1', '2']))
+    np.testing.assert_array_equal(observed['iid'], ids)
     np.testing.assert_array_equal(observed['y'], y)
     np.testing.assert_array_equal(observed['X'], X)
     np.testing.assert_array_equal(observed['Rs'], grm)
