@@ -402,6 +402,28 @@ def test_add_subpop_trait_can_override_existing_subpop_trait():
     np.testing.assert_array_equal(pop.traits["subpop"].y, np.zeros(pop.N, dtype=int))
 
 
+def test_superpopulation_set_params_updates_selected_or_active_populations():
+    pops = [
+        psg.Population(N=4, M=5, p_init=0.3, seed=idx)
+        for idx in range(3)
+    ]
+    spop = psg.SuperPopulation(pops)
+    spop.inactivate_population(1)
+
+    spop.set_params(mu=0.02)
+    assert spop.pops[0].params.mu == 0.02
+    assert spop.pops[2].params.mu == 0.02
+    assert spop.pops[1].params.mu == 0.0
+
+    spop.set_params(pop_i=[1], R_type="uniform", AM_r=0.3)
+    assert spop.pops[1].params.R_type == "uniform"
+    assert spop.pops[1].params.AM_r == 0.3
+    np.testing.assert_allclose(
+        spop.pops[1].params.R,
+        psg.genome.generate_recombination_rates(spop.pops[1].M, R_type="uniform"),
+    )
+
+
 def test_superpopulation_from_FST_accepts_per_population_FST_with_warning():
     p0 = np.linspace(0.2, 0.8, 5)
     fst = np.array([0.01, 0.05])

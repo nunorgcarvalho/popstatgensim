@@ -600,6 +600,19 @@ class SuperPopulation:
             pop_kwargs = misc_utils.get_pop_kwargs(i, **kwargs)
             pop.add_trait(name=name, effects=effects, **pop_kwargs)
 
+    def set_params(self, pop_i: Union[int, list] = None, params=None, **kwargs):
+        '''
+        Updates simulation parameters for selected populations in the superpopulation.
+        Parameters:
+            pop_i (int or list): Population indices to update. Defaults to all active populations.
+            params (PopulationParams or dict): Optional parameter object or dictionary
+                passed through to each selected Population.set_params() call.
+            **kwargs: Population parameter values to update.
+        '''
+        pop_indices = self._resolve_population_indices(pop_i)
+        for idx in pop_indices:
+            self.pops[idx].set_params(params=params, **kwargs)
+
     def add_subpop_trait(self, pop_i: Union[int, list] = None,
                          override: bool = False):
         '''
