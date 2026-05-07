@@ -282,6 +282,37 @@ def test_join_populations_can_randomly_sample_Ns_before_joining():
     )
 
 
+def test_join_populations_can_return_joined_population_object():
+    pops = [
+        psg.Population(N=4, M=5, p_init=0.3, seed=idx)
+        for idx in range(2)
+    ]
+    spop = psg.SuperPopulation(pops)
+
+    joined = spop.join_populations(return_obj=True)
+
+    assert joined is spop.pops[-1]
+    assert joined.N == 8
+
+
+def test_join_populations_inherits_first_population_params_and_warns_on_mismatch():
+    pops = [
+        psg.Population(N=4, M=5, p_init=0.3, seed=idx)
+        for idx in range(2)
+    ]
+    pops[0].set_params(mu=0.02, R_type="uniform")
+    pops[1].set_params(mu=0.05, R_type="blocks")
+    spop = psg.SuperPopulation(pops)
+
+    with pytest.warns(UserWarning, match="inherit the first population's params"):
+        joined = spop.join_populations(return_obj=True)
+
+    assert joined.params is not pops[0].params
+    assert joined.params.mu == pops[0].params.mu
+    assert joined.params.R_type == pops[0].params.R_type
+    np.testing.assert_allclose(joined.params.R, pops[0].params.R)
+
+
 def test_join_populations_rejects_odd_Ns_total():
     spop = psg.SuperPopulation([
         psg.Population(N=5, M=4, p_init=0.3, seed=1),
@@ -466,6 +497,7 @@ def test_validate_moves_eps_component_to_the_end():
 
 def test_random_effect_seed_is_deterministic_and_static_kernel_is_dropped_on_subset():
     pop = psg.Population(N=8, M=5, p_init=0.3, seed=2)
+    pop.set_params(mu=0.02, AM_r=0.1, R_type="uniform")
     x = np.arange(pop.N, dtype=float)
     pop.add_trait(
         name="y",
@@ -495,6 +527,11 @@ def test_random_effect_seed_is_deterministic_and_static_kernel_is_dropped_on_sub
     assert "static" not in subset_trait.effects
     assert subset_trait.y_["dyn"].shape == (pop.N - 2,)
     assert not np.allclose(subset_trait.y_["dyn"], dyn_initial[: subset.N])
+    assert subset.params is not pop.params
+    assert subset.params.mu == pop.params.mu
+    assert subset.params.AM_r == pop.params.AM_r
+    assert subset.params.R_type == pop.params.R_type
+    np.testing.assert_allclose(subset.params.R, pop.params.R)
 
 
 def test_simulating_new_generation_drops_static_random_effects():

@@ -242,7 +242,13 @@ class SuperPopulation:
         )
 
         # preserves shared genome metadata from the first population
-        new_pop.params.R = gen_pops[0].params.R.copy()
+        if any(not pop_i._params_equal(gen_pops[0].params) for pop_i in gen_pops[1:]):
+            warnings.warn(
+                'Joining populations with different Population.params objects; '
+                "the joined population will inherit the first population's params.",
+                UserWarning,
+            )
+        new_pop.params = copy.deepcopy(gen_pops[0].params)
         new_pop.BPs = gen_pops[0].BPs.copy()
         new_pop.t = gen_pops[0].t
         new_pop.T_breaks = copy.deepcopy(gen_pops[0].T_breaks)
@@ -451,7 +457,8 @@ class SuperPopulation:
                          keep_past_generations: int = 0,
                          Ns: list = None,
                          N_new: int = None,
-                         admix_fractions: list = None):
+                         admix_fractions: list = None,
+                         return_obj: bool = False):
         '''
         Joins multiple populations into a single population. Inactivates the original populations and creates a new population from the merged haplotypes. The new population is added to the superpopulation as an active population.
         Parameters:
@@ -461,6 +468,8 @@ class SuperPopulation:
             Ns (list): Optional per-population sample sizes. If provided, each selected source population is randomly subset to the corresponding size before joining. The sum must be even.
             N_new (int): Optional total size of a newly admixed joined population. Must be provided together with `admix_fractions`, and cannot be used with `Ns`.
             admix_fractions (list): Optional per-population admixture fractions. Must have the same length as `pop_i` and add up to 1. Fractions are converted to integer counts that sum to `N_new`.
+            return_obj (bool): If True, returns the new joined Population object after
+                adding it to the superpopulation. Default is False.
         '''
         pop_i = self._resolve_population_indices(pop_i)
         pops = [self.pops[i] for i in pop_i]
@@ -499,6 +508,8 @@ class SuperPopulation:
         for i in pop_i:
             # updates graph to reflect that the populations are now joined
             self.graph[i, len(self.pops)-1] = 1
+        if return_obj:
+            return new_pop
 
     def split_population(self, pop_i: int, N_new: Union[int, list] = 2):
         '''

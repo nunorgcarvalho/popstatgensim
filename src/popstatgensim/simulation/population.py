@@ -323,6 +323,20 @@ class Population:
                 self._set_param_value(resolved, name, value)
         return resolved
 
+    def _params_equal(self, other_params: PopulationParams) -> bool:
+        '''
+        Returns whether another PopulationParams object matches this population's params.
+        '''
+        for field in fields(PopulationParams):
+            value_self = getattr(self.params, field.name)
+            value_other = getattr(other_params, field.name)
+            if isinstance(value_self, np.ndarray) or isinstance(value_other, np.ndarray):
+                if not np.array_equal(np.asarray(value_self), np.asarray(value_other)):
+                    return False
+            elif value_self != value_other:
+                return False
+        return True
+
     def set_founding_haplotypes(self):
         '''
         Generates a complementary haplotype array for each individual containing a haplotype identifier for each allele. This functions treats the current generation as founders (individuals are unrelated from each other) such that each of their chromosomes has a unique identifier for all alleles in it. Subsequent generations can then track the inheritance of these founding haplotypes. Haplotypes are given an integer in the order they appear in the haplotype array.
@@ -720,7 +734,7 @@ class Population:
             metric_last_k=self.metric_last_k,
         )
 
-        new_pop.params.R = self.params.R.copy()
+        new_pop.params = copy.deepcopy(self.params)
         new_pop.BPs = self.BPs.copy()
         new_pop.t = self.t
         new_pop.T_breaks = copy.deepcopy(self.T_breaks)
