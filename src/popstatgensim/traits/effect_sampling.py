@@ -12,9 +12,22 @@ def _normalize_effect_dist(dist: str) -> str:
     dist = str(dist).lower()
     if dist in {'constant', 'point_mass', 'pointmass'}:
         return 'constant'
+    if dist == 'constant_symmetric':
+        return dist
     if dist == 'normal':
         return dist
-    raise ValueError("dist must be either 'normal', 'constant', or 'point_mass'.")
+    raise ValueError("dist must be one of 'normal', 'constant', 'constant_symmetric', or 'point_mass'.")
+
+
+def _draw_constant_symmetric_effects(var_G: float, M_causal: int) -> np.ndarray:
+    '''
+    Returns equal-magnitude causal effects with a random half assigned negative signs.
+    '''
+    effects = np.full(M_causal, np.sqrt(var_G / M_causal), dtype=float)
+    if M_causal > 1:
+        neg_idx = np.random.choice(M_causal, size=M_causal // 2, replace=False)
+        effects[neg_idx] *= -1.0
+    return effects
 
 
 def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, dist: str = 'normal') -> tuple[np.ndarray, np.ndarray]:
@@ -27,6 +40,8 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
         dist (str): Distribution to draw causal effects from. Options are:
             - 'normal': Normal distribution (default).
             - 'constant' or 'point_mass': All causal effect sizes are the same.
+            - 'constant_symmetric': All causal effect sizes have the same magnitude,
+              and `M_causal // 2` are assigned the negative of that magnitude.
     Returns:
         tuple ((causal_effects, j_causal)):
         Where:
@@ -48,6 +63,8 @@ def generate_causal_effects(M: int, M_causal: int = None, var_G: float = 1.0, di
             causal_effects[j_causal] = np.random.normal(0, np.sqrt(var_G/M_causal), M_causal)
         elif dist == 'constant':
             causal_effects[j_causal] = np.sqrt(var_G/M_causal)
+        elif dist == 'constant_symmetric':
+            causal_effects[j_causal] = _draw_constant_symmetric_effects(var_G, M_causal)
     return (causal_effects, j_causal)
 
 def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
@@ -74,6 +91,10 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
               within each genetic component. In this mode `r` controls only the
               sign of `A_par`, because a point-mass pair cannot realize an
               arbitrary cross-effect correlation.
+            - 'constant_symmetric': All causal effect sizes have the same
+              magnitude within each genetic component, with `M_causal // 2`
+              randomly assigned the negative of that magnitude. In this mode `r`
+              controls only whether `A_par` shares or flips the same sign pattern.
         force_var (bool): Passed to both returned GeneticEffect objects.
         G (2D array): Optional offspring genotype matrix used to compute G_std for the A effect.
         G_std (1D array): Optional offspring genotype standard deviations for the A effect.
@@ -134,6 +155,15 @@ def generate_genetic_effects(var_A: float, var_A_par: float, r: float,
         elif dist == 'constant':
             effects_A[j_causal] = np.sqrt(var_A / M_causal)
             effects_A_par[j_causal] = np.sqrt(var_A_par / M_causal)
+            if r < 0:
+                effects_A_par[j_causal] *= -1.0
+        elif dist == 'constant_symmetric':
+            signs = np.ones(M_causal, dtype=float)
+            if M_causal > 1:
+                neg_idx = np.random.choice(M_causal, size=M_causal // 2, replace=False)
+                signs[neg_idx] = -1.0
+            effects_A[j_causal] = np.sqrt(var_A / M_causal) * signs
+            effects_A_par[j_causal] = np.sqrt(var_A_par / M_causal) * signs
             if r < 0:
                 effects_A_par[j_causal] *= -1.0
 

@@ -229,6 +229,50 @@ def test_generate_genetic_effects_supports_constant_distribution():
     assert np.isclose(np.sum(effect_A_par ** 2), 0.2)
 
 
+def test_generate_causal_effects_supports_constant_symmetric_distribution():
+    np.random.seed(12)
+    effects, j_causal = psg.traits.generate_causal_effects(
+        M=9,
+        M_causal=5,
+        var_G=2.0,
+        dist="constant_symmetric",
+    )
+
+    causal_values = effects[j_causal]
+    assert np.sum(causal_values < 0) == 2
+    assert np.sum(causal_values > 0) == 3
+    np.testing.assert_allclose(np.abs(causal_values), np.full(5, np.sqrt(2.0 / 5)))
+    assert np.isclose(np.sum(causal_values ** 2), 2.0)
+
+
+def test_generate_genetic_effects_supports_constant_symmetric_distribution():
+    np.random.seed(13)
+    effects = psg.traits.generate_genetic_effects(
+        var_A=0.8,
+        var_A_par=0.2,
+        r=-1.0,
+        M=10,
+        M_causal=5,
+        dist="constant_symmetric",
+    )
+
+    effect_A = effects["A"].effects_standardized
+    effect_A_par = effects["A_par"].effects_standardized
+    j_causal = effects["A"].j_causal
+
+    np.testing.assert_array_equal(j_causal, effects["A_par"].j_causal)
+    assert np.sum(effect_A[j_causal] < 0) == 2
+    assert np.sum(effect_A[j_causal] > 0) == 3
+    np.testing.assert_allclose(np.abs(effect_A[j_causal]), np.full(5, np.sqrt(0.8 / 5)))
+    np.testing.assert_allclose(np.abs(effect_A_par[j_causal]), np.full(5, np.sqrt(0.2 / 5)))
+    np.testing.assert_allclose(
+        np.sign(effect_A_par[j_causal]),
+        -np.sign(effect_A[j_causal]),
+    )
+    assert np.isclose(np.sum(effect_A ** 2), 0.8)
+    assert np.isclose(np.sum(effect_A_par ** 2), 0.2)
+
+
 def test_trait_add_popstrat_adds_cluster_constant_component_after_join():
     pops = [
         psg.Population(N=4, M=5, p_init=0.3, seed=idx)
