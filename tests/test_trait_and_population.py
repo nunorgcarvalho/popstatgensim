@@ -733,6 +733,68 @@ def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
     assert out.intercept_se is None
     assert out.covar_est is None
     assert out.covar_se is None
+    assert out.gamma_est is None
+    assert out.gamma_se is None
+    assert out.within_family is None
+
+
+def test_trait_run_gwas_within_family_gpar_reports_gamma_separately():
+    pop = psg.Population(N=8, M=3, p_init=0.3, seed=43)
+    x = np.linspace(-1.0, 1.0, pop.N)
+    gpar = pop.G + np.array([0.5, 1.0, -0.5], dtype=float)[None, :]
+    pop.G_par = gpar
+    beta = np.array([0.3, -0.1, 0.2], dtype=float)
+    gamma = np.array([0.4, 0.2, -0.3], dtype=float)
+    y = 0.8 + 0.5 * x + pop.G @ beta + gpar @ gamma
+    pop.add_trait_from_fixed_values(name="y", y=y)
+
+    out = pop.traits["y"].run_GWAS(
+        covariates=x[:, None],
+        within_family='Gpar',
+        standardize_y=False,
+        standardize_geno=False,
+        detailed_output=True,
+    )
+
+    assert out.within_family == 'Gpar'
+    assert out.gamma_est is not None
+    assert out.gamma_se is not None
+    assert out.n_covariates == 1
+
+    expected_intercepts = np.empty(pop.M, dtype=float)
+    expected_intercept_se = np.empty(pop.M, dtype=float)
+    expected_covar = np.empty((pop.M, 1), dtype=float)
+    expected_covar_se = np.empty((pop.M, 1), dtype=float)
+    expected_gamma = np.empty(pop.M, dtype=float)
+    expected_gamma_se = np.empty(pop.M, dtype=float)
+    expected_beta = np.empty(pop.M, dtype=float)
+    expected_beta_se = np.empty(pop.M, dtype=float)
+
+    for j in range(pop.M):
+        X = np.column_stack((np.ones(pop.N), x, gpar[:, j], pop.G[:, j]))
+        xtx_inv = np.linalg.pinv(X.T @ X)
+        coef = xtx_inv @ (X.T @ y)
+        resid = y - X @ coef
+        sigma2 = float(resid @ resid) / (pop.N - X.shape[1])
+        vcov = sigma2 * xtx_inv
+        se = np.sqrt(np.diag(vcov))
+        expected_intercepts[j] = coef[0]
+        expected_intercept_se[j] = se[0]
+        expected_covar[j, 0] = coef[1]
+        expected_covar_se[j, 0] = se[1]
+        expected_gamma[j] = coef[2]
+        expected_gamma_se[j] = se[2]
+        expected_beta[j] = coef[3]
+        expected_beta_se[j] = se[3]
+
+    np.testing.assert_allclose(out.intercept_est, expected_intercepts)
+    np.testing.assert_allclose(out.intercept_se, expected_intercept_se)
+    np.testing.assert_allclose(out.covar_est, expected_covar)
+    np.testing.assert_allclose(out.covar_se, expected_covar_se)
+    np.testing.assert_allclose(out.gamma_est, expected_gamma)
+    np.testing.assert_allclose(out.gamma_se, expected_gamma_se)
+    np.testing.assert_allclose(out.beta_est, expected_beta)
+    np.testing.assert_allclose(out.beta_se, expected_beta_se)
 
 
 def test_prune_sibs_applies_min_and_max_filters_deterministically():

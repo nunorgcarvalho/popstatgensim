@@ -809,10 +809,11 @@ class Trait:
         )
 
     def run_GWAS(self, covariates: np.ndarray = None,
+                 within_family: str = None,
                  standardize_y: bool = True,
                  standardize_geno: bool = True,
                  detailed_output: bool = False,
-                 verbose: bool = False) -> dict:
+                 verbose: bool = False):
         '''
         Runs a univariate GWAS for this trait across all current-generation variants.
         '''
@@ -820,15 +821,22 @@ class Trait:
             raise ValueError("Trait.run_GWAS() requires the trait to be attached to a Population.")
 
         G = self.pop.X if standardize_geno else self.pop.G
+        G_par = None
+        if within_family is not None:
+            if within_family != 'Gpar':
+                raise ValueError("`within_family` must be None or 'Gpar'.")
+            G_par = self.pop.get_Gpar()
         out = _run_GWAS(
             y=self.y,
             G=G,
             covariates=covariates,
+            G_par=G_par,
             standardize_y=standardize_y,
             detailed_output=detailed_output,
             verbose=verbose,
             trait_name=self.name,
             standardize_geno=standardize_geno,
+            within_family=within_family,
         )
         return out
 
