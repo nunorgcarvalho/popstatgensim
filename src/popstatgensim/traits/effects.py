@@ -119,7 +119,7 @@ class GeneticEffect(Effect):
                 f"component variance will be scaled to sum(effects_standardized^2)={obj.var_indep:.6g}."
             )
         elif var_indep is None and obj.effects_standardized is not None:
-            obj.var_indep = obj.M * obj.effects_standardized.var()
+            obj.var_indep = (obj.effects_standardized**2).sum()
         elif var_indep is None:
             obj.var_indep = None
         else:

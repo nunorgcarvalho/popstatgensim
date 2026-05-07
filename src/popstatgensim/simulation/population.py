@@ -2081,10 +2081,11 @@ class Population:
             omit_mono (bool): Whether variants that are monomorphic (p = 0 or 1) should be skipped over when plotting. Default is False.
         '''
         # chooses between LD and correlation matrix
-        if type == 'LD':
-            LD_matrix = self.LD_matrix
-        elif type == 'corr':
-            LD_matrix = self.corr_matrix
+        if LD_matrix is None:
+            if type == 'LD':
+                LD_matrix = self.LD_matrix
+            elif type == 'corr':
+                LD_matrix = self.corr_matrix
         if plot_range is not None:
             start, stop = plot_range
         else:
