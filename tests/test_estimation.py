@@ -183,7 +183,7 @@ def test_run_reml_lazy_safety_falls_back_after_strict_blowup(monkeypatch):
     assert out["algorithm"]["requested_method"] == "AI_stochastic"
 
 
-def test_run_eo_am_matches_manual_even_odd_correlation():
+def test_run_eo_am_matches_manual_even_odd_regression():
     x = np.array(
         [
             [1.0, 2.0, 0.5, -1.0, 2.0, 1.5],
@@ -200,8 +200,122 @@ def test_run_eo_am_matches_manual_even_odd_correlation():
 
     odd_pgs = x[:, [0, 1, 4, 5]] @ weights[[0, 1, 4, 5]]
     even_pgs = x[:, [2, 3]] @ weights[[2, 3]]
-    expected = np.corrcoef(odd_pgs, even_pgs)[0, 1]
-    assert np.isclose(out, expected)
+    odd_pgs = (odd_pgs - odd_pgs.mean()) / odd_pgs.std()
+    even_pgs = (even_pgs - even_pgs.mean()) / even_pgs.std()
+
+    design = np.column_stack([np.ones(x.shape[0]), odd_pgs])
+    beta = np.linalg.pinv(design.T @ design) @ (design.T @ even_pgs)
+    resid = even_pgs - design @ beta
+    sigma2 = float(resid @ resid) / (x.shape[0] - design.shape[1])
+    vcov = sigma2 * np.linalg.pinv(design.T @ design)
+    se = np.sqrt(np.diag(vcov))
+
+    assert np.isclose(out["theta_est"], beta[1])
+    assert np.isclose(out["theta_se"], se[1])
+    assert np.isclose(out["intercept_est"], beta[0])
+    assert np.isclose(out["intercept_se"], se[0])
+    assert out["n_covariates"] == 0
+    assert out["covariate_names"] == []
+    assert out["covar_est"].shape == (0,)
+    assert out["covar_se"].shape == (0,)
+    assert out["predictor_side"] == "odd"
+    assert out["outcome_side"] == "even"
+    assert out["even_against_odd"] is True
+
+
+def test_run_eo_am_flips_orientation_when_requested():
+    x = np.array(
+        [
+            [1.0, 2.0, 0.5, -1.0, 2.0, 1.5],
+            [0.0, -1.0, 1.5, 2.0, -0.5, 0.0],
+            [2.0, 1.0, -0.5, 1.0, 0.5, -1.0],
+            [-1.0, 0.5, 2.0, 0.0, 1.0, 2.5],
+        ],
+        dtype=float,
+    )
+    weights = np.array([0.2, -0.1, 0.3, 0.4, -0.2, 0.1], dtype=float)
+    chrom_idx = [0, 2, 4]
+
+    out = run_EO_AM(
+        X=x,
+        pgs_weights=weights,
+        chrom_idx=chrom_idx,
+        even_against_odd=False,
+    )
+
+    odd_pgs = x[:, [0, 1, 4, 5]] @ weights[[0, 1, 4, 5]]
+    even_pgs = x[:, [2, 3]] @ weights[[2, 3]]
+    odd_pgs = (odd_pgs - odd_pgs.mean()) / odd_pgs.std()
+    even_pgs = (even_pgs - even_pgs.mean()) / even_pgs.std()
+    design = np.column_stack([np.ones(x.shape[0]), even_pgs])
+    beta = np.linalg.pinv(design.T @ design) @ (design.T @ odd_pgs)
+
+    assert np.isclose(out["theta_est"], beta[1])
+    assert out["predictor_side"] == "even"
+    assert out["outcome_side"] == "odd"
+    assert out["even_against_odd"] is False
+
+
+def test_run_eo_am_adjusts_predictor_side_pcs():
+    x = np.array(
+        [
+            [0.0, 1.0, 2.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0, 2.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0, 1.0, 2.0, 1.0],
+            [0.0, 2.0, 1.0, 0.0, 1.0, 2.0],
+            [1.0, 1.0, 2.0, 2.0, 0.0, 1.0],
+            [2.0, 0.0, 1.0, 1.0, 2.0, 0.0],
+        ],
+        dtype=float,
+    )
+    weights = np.array([0.1, 0.3, -0.2, 0.4, 0.2, -0.1], dtype=float)
+    chrom_idx = [0, 2, 4]
+
+    out = run_EO_AM(
+        X=x,
+        pgs_weights=weights,
+        chrom_idx=chrom_idx,
+        adjust_PCs=2,
+        standardized_geno=False,
+    )
+
+    assert out["n_covariates"] == 2
+    assert out["covariate_names"] == ["PC1", "PC2"]
+    assert out["covar_est"].shape == (2,)
+    assert out["covar_se"].shape == (2,)
+    assert np.isfinite(out["covar_est"]).all()
+    assert np.isfinite(out["covar_se"]).all()
+
+
+def test_run_eo_am_adjusts_standardized_predictor_side_pcs_when_flipped():
+    x = np.array(
+        [
+            [0.0, 1.0, 2.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0, 2.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0, 1.0, 2.0, 1.0],
+            [0.0, 2.0, 1.0, 0.0, 1.0, 2.0],
+            [1.0, 1.0, 2.0, 2.0, 0.0, 1.0],
+            [2.0, 0.0, 1.0, 1.0, 2.0, 0.0],
+        ],
+        dtype=float,
+    )
+    x_std = (x - x.mean(axis=0, keepdims=True)) / x.std(axis=0, keepdims=True)
+    weights = np.array([0.1, 0.3, -0.2, 0.4, 0.2, -0.1], dtype=float)
+    chrom_idx = [0, 2, 4]
+
+    out = run_EO_AM(
+        X=x_std,
+        pgs_weights=weights,
+        chrom_idx=chrom_idx,
+        adjust_PCs=1,
+        even_against_odd=False,
+        standardized_geno=True,
+    )
+
+    assert out["n_covariates"] == 1
+    assert out["covariate_names"] == ["PC1"]
+    assert out["predictor_side"] == "even"
+    assert out["outcome_side"] == "odd"
 
 
 def test_run_eo_am_requires_at_least_two_chromosomes():
@@ -243,6 +357,7 @@ def test_gwasresult_wrapper_get_exp_pgs_r2_uses_stored_n_and_m():
         standardize_y=True,
         standardize_geno=True,
         detailed_output=False,
+        within_family=None,
         beta_est=np.zeros(200, dtype=float),
         beta_se=np.ones(200, dtype=float),
     )

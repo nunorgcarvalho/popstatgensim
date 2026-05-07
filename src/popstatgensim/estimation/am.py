@@ -6,6 +6,8 @@ from typing import Sequence
 
 import numpy as np
 
+from ..genome.pca import compute_PCA
+
 
 def _normalize_chrom_idx(chrom_idx: Sequence[int] | np.ndarray, M: int) -> np.ndarray:
     """Validate and normalize chromosome start indices."""
@@ -25,35 +27,68 @@ def _normalize_chrom_idx(chrom_idx: Sequence[int] | np.ndarray, M: int) -> np.nd
     return chrom_idx
 
 
+def _standardize_vector(values: np.ndarray, name: str) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f'`{name}` must be a 1D array.')
+    sd = float(values.std())
+    if not np.isfinite(sd) or np.isclose(sd, 0.0):
+        raise ValueError(f'`{name}` has zero variance and cannot be standardized.')
+    return (values - values.mean()) / sd
+
+
+def _fit_linear_regression(y: np.ndarray, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fits OLS and returns coefficient estimates with standard errors."""
+    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=float)
+    if y.ndim != 1:
+        raise ValueError('`y` must be a 1D array.')
+    if X.ndim != 2:
+        raise ValueError('`X` must be a 2D array.')
+    if X.shape[0] != y.shape[0]:
+        raise ValueError('`X` and `y` must have the same number of rows.')
+
+    n_samples, n_params = X.shape
+    dof = n_samples - n_params
+    if dof <= 0:
+        raise ValueError('Not enough samples to fit the even-odd regression.')
+
+    xtx_inv = np.linalg.pinv(X.T @ X)
+    beta = xtx_inv @ (X.T @ y)
+    resid = y - (X @ beta)
+    sigma2 = float(resid @ resid) / dof
+    vcov = sigma2 * xtx_inv
+    se = np.sqrt(np.clip(np.diag(vcov), 0.0, None))
+    return beta, se
+
+
+def _compute_predictor_pcs(G: np.ndarray, n_pcs: int, standardized_geno: bool) -> np.ndarray:
+    """Computes predictor-side chromosome PCs for EO-AM adjustment."""
+    if n_pcs <= 0:
+        return np.empty((G.shape[0], 0), dtype=float)
+    if standardized_geno:
+        pca = compute_PCA(X=G, n_components=n_pcs)
+    else:
+        p = np.asarray(G.mean(axis=0) / 2.0, dtype=float)
+        pca = compute_PCA(G=G, p=p, P=2, n_components=n_pcs)
+    return np.asarray(pca.scores[:, :n_pcs], dtype=float)
+
+
 def run_EO_AM(
     X: np.ndarray,
     pgs_weights: np.ndarray,
     chrom_idx: Sequence[int] | np.ndarray,
-) -> float:
+    adjust_PCs: int = 0,
+    even_against_odd: bool = True,
+    standardized_geno: bool = False,
+) -> dict:
     r"""
     Estimate assortative mating from even- versus odd-chromosome polygenic scores.
 
-    This implements the even-odd chromosome correlation approach described by
-    Yengo et al.:
-    Yengo L, Robinson MR, Keller MC, et al. *Imprint of assortative mating on
-    the human genome*. Nature Human Behaviour. 2018;2(12):948-954.
-    doi:10.1038/s41562-018-0476-3
-
-    Parameters
-    ----------
-    X : ndarray, shape (N, M)
-        Standardized genotype matrix.
-    pgs_weights : ndarray, shape (M,)
-        Variant weights used to form the polygenic scores.
-    chrom_idx : array-like of int
-        Variant indices marking the start of each chromosome. Index 0 is always
-        treated as a chromosome start.
-
-    Returns
-    -------
-    float
-        Pearson correlation between the odd-chromosome and even-chromosome PGS
-        values across the same individuals.
+    This implements the even-odd chromosome regression approach described by
+    Yengo et al. using standardized chromosome-specific PGS values, optionally
+    adjusting for principal components computed from the predictor-side
+    chromosome set only.
     """
     X = np.asarray(X, dtype=float)
     if X.ndim != 2:
@@ -70,6 +105,10 @@ def run_EO_AM(
         raise ValueError(
             f'`pgs_weights` must have length {X.shape[1]} to match the number of variants in `X`.'
         )
+
+    adjust_PCs = int(adjust_PCs)
+    if adjust_PCs < 0:
+        raise ValueError('`adjust_PCs` must be non-negative.')
 
     M = X.shape[1]
     chrom_idx = _normalize_chrom_idx(chrom_idx=chrom_idx, M=M)
@@ -90,7 +129,46 @@ def run_EO_AM(
 
     pgs_odd = X[:, odd_mask] @ pgs_weights[odd_mask]
     pgs_even = X[:, even_mask] @ pgs_weights[even_mask]
-    return float(np.corrcoef(pgs_odd, pgs_even)[0, 1])
+    pgs_odd = _standardize_vector(pgs_odd, name='odd PGS')
+    pgs_even = _standardize_vector(pgs_even, name='even PGS')
+
+    if even_against_odd:
+        y = pgs_even
+        predictor = pgs_odd
+        pc_source = X[:, odd_mask]
+        predictor_label = 'odd'
+        outcome_label = 'even'
+    else:
+        y = pgs_odd
+        predictor = pgs_even
+        pc_source = X[:, even_mask]
+        predictor_label = 'even'
+        outcome_label = 'odd'
+
+    covariates = _compute_predictor_pcs(
+        G=np.asarray(pc_source, dtype=float),
+        n_pcs=adjust_PCs,
+        standardized_geno=standardized_geno,
+    )
+
+    intercept = np.ones((X.shape[0], 1), dtype=float)
+    design = np.column_stack([intercept, predictor[:, None], covariates])
+    beta, se = _fit_linear_regression(y=y, X=design)
+
+    covariate_names = [f'PC{i}' for i in range(1, covariates.shape[1] + 1)]
+    return {
+        'theta_est': float(beta[1]),
+        'theta_se': float(se[1]),
+        'intercept_est': float(beta[0]),
+        'intercept_se': float(se[0]),
+        'covar_est': np.asarray(beta[2:], dtype=float),
+        'covar_se': np.asarray(se[2:], dtype=float),
+        'covariate_names': covariate_names,
+        'n_covariates': int(covariates.shape[1]),
+        'even_against_odd': bool(even_against_odd),
+        'predictor_side': predictor_label,
+        'outcome_side': outcome_label,
+    }
 
 
 __all__ = ["run_EO_AM"]
