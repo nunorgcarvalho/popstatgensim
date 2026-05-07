@@ -8,6 +8,7 @@ from typing import Union
 
 import numpy as np
 
+from ..estimation.gwas import run_GWAS as _run_GWAS
 from . import effect_sampling as sampling
 from .effects import Effect, FixedEffect, GeneticEffect, NoiseEffect, RandomEffect
 from .pgs import simulate_pgs_standardized_weights
@@ -806,6 +807,30 @@ class Trait:
             rng=rng,
             seed=seed,
         )
+
+    def run_GWAS(self, covariates: np.ndarray = None,
+                 standardize_y: bool = True,
+                 standardize_geno: bool = True,
+                 detailed_output: bool = False,
+                 verbose: bool = False) -> dict:
+        '''
+        Runs a univariate GWAS for this trait across all current-generation variants.
+        '''
+        if self.pop is None:
+            raise ValueError("Trait.run_GWAS() requires the trait to be attached to a Population.")
+
+        G = self.pop.X if standardize_geno else self.pop.G
+        out = _run_GWAS(
+            y=self.y,
+            G=G,
+            covariates=covariates,
+            standardize_y=standardize_y,
+            detailed_output=detailed_output,
+            verbose=verbose,
+        )
+        out['trait_name'] = self.name
+        out['standardize_geno'] = bool(standardize_geno)
+        return out
 
     def get_components_matrix(self, exclude = None, include_y = True) -> np.ndarray:
         '''

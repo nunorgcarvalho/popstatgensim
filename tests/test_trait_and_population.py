@@ -596,6 +596,86 @@ def test_trait_simulate_pgs_weights_wraps_additive_effects():
     np.testing.assert_allclose(observed, expected)
 
 
+def test_trait_run_gwas_matches_manual_ols_with_covariates():
+    pop = psg.Population(N=8, M=3, p_init=0.3, seed=41)
+    x = np.linspace(-1.5, 1.5, pop.N)
+    beta = np.array([0.4, -0.2, 0.1], dtype=float)
+    y = 1.2 + 0.7 * x + pop.G @ beta
+    pop.add_trait_from_fixed_values(name="y", y=y)
+
+    out = pop.traits["y"].run_GWAS(
+        covariates=x[:, None],
+        standardize_y=False,
+        standardize_geno=False,
+        detailed_output=True,
+    )
+
+    assert out["trait_name"] == "y"
+    assert out["n_samples"] == pop.N
+    assert out["n_variants"] == pop.M
+    assert out["n_covariates"] == 1
+    assert out["detailed_output"] is True
+
+    expected_intercepts = np.empty(pop.M, dtype=float)
+    expected_intercept_se = np.empty(pop.M, dtype=float)
+    expected_covar = np.empty((pop.M, 1), dtype=float)
+    expected_covar_se = np.empty((pop.M, 1), dtype=float)
+    expected_beta = np.empty(pop.M, dtype=float)
+    expected_beta_se = np.empty(pop.M, dtype=float)
+
+    for j in range(pop.M):
+        X = np.column_stack((np.ones(pop.N), x, pop.G[:, j]))
+        xtx_inv = np.linalg.pinv(X.T @ X)
+        coef = xtx_inv @ (X.T @ y)
+        resid = y - X @ coef
+        sigma2 = float(resid @ resid) / (pop.N - X.shape[1])
+        vcov = sigma2 * xtx_inv
+        se = np.sqrt(np.diag(vcov))
+        expected_intercepts[j] = coef[0]
+        expected_intercept_se[j] = se[0]
+        expected_covar[j, 0] = coef[1]
+        expected_covar_se[j, 0] = se[1]
+        expected_beta[j] = coef[2]
+        expected_beta_se[j] = se[2]
+
+    np.testing.assert_allclose(out["intercept_est"], expected_intercepts)
+    np.testing.assert_allclose(out["intercept_se"], expected_intercept_se)
+    np.testing.assert_allclose(out["covar_est"], expected_covar)
+    np.testing.assert_allclose(out["covar_se"], expected_covar_se)
+    np.testing.assert_allclose(out["beta_est"], expected_beta)
+    np.testing.assert_allclose(out["beta_se"], expected_beta_se)
+
+
+def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
+    pop = psg.Population(N=7, M=2, p_init=0.3, seed=42)
+    y = np.array([0.5, 1.1, -0.2, 2.4, -1.3, 0.7, 1.8], dtype=float)
+    pop.add_trait_from_fixed_values(name="y", y=y)
+
+    out = pop.traits["y"].run_GWAS()
+
+    y_std = (y - y.mean()) / y.std()
+    expected_beta = np.empty(pop.M, dtype=float)
+    expected_beta_se = np.empty(pop.M, dtype=float)
+    for j in range(pop.M):
+        X = np.column_stack((np.ones(pop.N), np.asarray(pop.X[:, j], dtype=float)))
+        xtx_inv = np.linalg.pinv(X.T @ X)
+        coef = xtx_inv @ (X.T @ y_std)
+        resid = y_std - X @ coef
+        sigma2 = float(resid @ resid) / (pop.N - X.shape[1])
+        vcov = sigma2 * xtx_inv
+        se = np.sqrt(np.diag(vcov))
+        expected_beta[j] = coef[1]
+        expected_beta_se[j] = se[1]
+
+    np.testing.assert_allclose(out["beta_est"], expected_beta)
+    np.testing.assert_allclose(out["beta_se"], expected_beta_se)
+    assert out["detailed_output"] is False
+    assert "intercept_est" not in out
+    assert "intercept_se" not in out
+    assert "covar_est" not in out
+    assert "covar_se" not in out
+
+
 def test_prune_sibs_applies_min_and_max_filters_deterministically():
     pop = psg.Population(N=6, M=5, p_init=0.3, seed=17)
     pop.relations["full_sibs"] = np.array([0, 0, 0, 1, 1, -1], dtype=np.int32)
