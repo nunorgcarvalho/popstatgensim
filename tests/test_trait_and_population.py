@@ -610,11 +610,11 @@ def test_trait_run_gwas_matches_manual_ols_with_covariates():
         detailed_output=True,
     )
 
-    assert out["trait_name"] == "y"
-    assert out["n_samples"] == pop.N
-    assert out["n_variants"] == pop.M
-    assert out["n_covariates"] == 1
-    assert out["detailed_output"] is True
+    assert out.trait_name == "y"
+    assert out.N == pop.N
+    assert out.M == pop.M
+    assert out.n_covariates == 1
+    assert out.detailed_output is True
 
     expected_intercepts = np.empty(pop.M, dtype=float)
     expected_intercept_se = np.empty(pop.M, dtype=float)
@@ -638,12 +638,12 @@ def test_trait_run_gwas_matches_manual_ols_with_covariates():
         expected_beta[j] = coef[2]
         expected_beta_se[j] = se[2]
 
-    np.testing.assert_allclose(out["intercept_est"], expected_intercepts)
-    np.testing.assert_allclose(out["intercept_se"], expected_intercept_se)
-    np.testing.assert_allclose(out["covar_est"], expected_covar)
-    np.testing.assert_allclose(out["covar_se"], expected_covar_se)
-    np.testing.assert_allclose(out["beta_est"], expected_beta)
-    np.testing.assert_allclose(out["beta_se"], expected_beta_se)
+    np.testing.assert_allclose(out.intercept_est, expected_intercepts)
+    np.testing.assert_allclose(out.intercept_se, expected_intercept_se)
+    np.testing.assert_allclose(out.covar_est, expected_covar)
+    np.testing.assert_allclose(out.covar_se, expected_covar_se)
+    np.testing.assert_allclose(out.beta_est, expected_beta)
+    np.testing.assert_allclose(out.beta_se, expected_beta_se)
 
 
 def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
@@ -667,13 +667,13 @@ def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
         expected_beta[j] = coef[1]
         expected_beta_se[j] = se[1]
 
-    np.testing.assert_allclose(out["beta_est"], expected_beta)
-    np.testing.assert_allclose(out["beta_se"], expected_beta_se)
-    assert out["detailed_output"] is False
-    assert "intercept_est" not in out
-    assert "intercept_se" not in out
-    assert "covar_est" not in out
-    assert "covar_se" not in out
+    np.testing.assert_allclose(out.beta_est, expected_beta)
+    np.testing.assert_allclose(out.beta_se, expected_beta_se)
+    assert out.detailed_output is False
+    assert out.intercept_est is None
+    assert out.intercept_se is None
+    assert out.covar_est is None
+    assert out.covar_se is None
 
 
 def test_prune_sibs_applies_min_and_max_filters_deterministically():

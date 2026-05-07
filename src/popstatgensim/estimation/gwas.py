@@ -2,7 +2,49 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
+
+from .pgs import get_exp_PGS_R2
+
+
+@dataclass
+class GWASresult:
+    """
+    Container for GWAS outputs.
+
+    Attributes
+    ----------
+    N : int
+        Number of samples used in the GWAS.
+    M : int
+        Number of variants tested in the GWAS.
+    """
+
+    trait_name: str | None
+    N: int
+    M: int
+    n_covariates: int
+    standardize_y: bool
+    standardize_geno: bool
+    detailed_output: bool
+    beta_est: np.ndarray
+    beta_se: np.ndarray
+    intercept_est: np.ndarray | None = None
+    intercept_se: np.ndarray | None = None
+    covar_est: np.ndarray | None = None
+    covar_se: np.ndarray | None = None
+
+    def get_exp_PGS_R2(self, h2: float) -> float:
+        """
+        Return the expected PGS R^2 using this GWAS sample size and variant count.
+
+        Reference
+        ---------
+        Daetwyler et al. 2008, PLoS ONE.
+        """
+        return get_exp_PGS_R2(h2=h2, N=self.N, M=self.M)
 
 
 def _validate_gwas_inputs(
@@ -48,7 +90,9 @@ def run_GWAS(
     standardize_y: bool = True,
     detailed_output: bool = False,
     verbose: bool = False,
-) -> dict:
+    trait_name: str | None = None,
+    standardize_geno: bool = True,
+) -> GWASresult:
     """
     Run a univariate linear-regression GWAS across all variants.
     """
@@ -108,25 +152,21 @@ def run_GWAS(
         beta_est[j] = beta_full[-1]
         beta_se[j] = se_full[-1]
 
-    return {
-        "n_samples": n_samples,
-        "n_variants": n_variants,
-        "n_covariates": n_covariates,
-        "standardize_y": bool(standardize_y),
-        "detailed_output": bool(detailed_output),
-        "beta_est": beta_est,
-        "beta_se": beta_se,
-        **(
-            {
-                "intercept_est": intercept_est,
-                "intercept_se": intercept_se,
-                "covar_est": covar_est,
-                "covar_se": covar_se,
-            }
-            if detailed_output else
-            {}
-        ),
-    }
+    return GWASresult(
+        trait_name=trait_name,
+        N=n_samples,
+        M=n_variants,
+        n_covariates=n_covariates,
+        standardize_y=bool(standardize_y),
+        standardize_geno=bool(standardize_geno),
+        detailed_output=bool(detailed_output),
+        beta_est=beta_est,
+        beta_se=beta_se,
+        intercept_est=intercept_est if detailed_output else None,
+        intercept_se=intercept_se if detailed_output else None,
+        covar_est=covar_est if detailed_output else None,
+        covar_se=covar_se if detailed_output else None,
+    )
 
 
-__all__ = ["run_GWAS"]
+__all__ = ["GWASresult", "run_GWAS"]

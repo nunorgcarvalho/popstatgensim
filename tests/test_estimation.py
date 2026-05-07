@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 
 import popstatgensim as psg
-from popstatgensim.estimation import reml as reml_mod
+from popstatgensim.estimation import (
+    GWASresult,
+    get_exp_PGS_R2,
+    get_PGS_N_for_R2,
+    reml as reml_mod,
+)
 from popstatgensim import run_EO_AM, run_HEreg, run_REML
 from popstatgensim.traits import build_design_matrix_from_groups
 
@@ -212,3 +217,36 @@ def test_population_get_chrom_idx_uses_r_half_and_includes_zero():
     pop.set_params(R=np.array([0.1, 0.5, 0.2, 0.5, 0.1, 0.1], dtype=float))
 
     np.testing.assert_array_equal(pop.get_chrom_idx(), np.array([0, 1, 3], dtype=int))
+
+
+def test_get_exp_pgs_r2_matches_closed_form():
+    observed = get_exp_PGS_R2(h2=0.4, N=1000, M=200)
+    expected = (0.4 ** 2) / (0.4 + (200 / 1000))
+    assert np.isclose(observed, expected)
+
+
+def test_get_pgs_n_for_r2_inverts_expected_r2_formula():
+    h2 = 0.4
+    M = 200
+    N = 1000
+    r2 = get_exp_PGS_R2(h2=h2, N=N, M=M)
+    observed = get_PGS_N_for_R2(h2=h2, R2=r2, M=M)
+    assert np.isclose(observed, N)
+
+
+def test_gwasresult_wrapper_get_exp_pgs_r2_uses_stored_n_and_m():
+    result = GWASresult(
+        trait_name="y",
+        N=1000,
+        M=200,
+        n_covariates=0,
+        standardize_y=True,
+        standardize_geno=True,
+        detailed_output=False,
+        beta_est=np.zeros(200, dtype=float),
+        beta_se=np.ones(200, dtype=float),
+    )
+
+    observed = result.get_exp_PGS_R2(h2=0.4)
+    expected = get_exp_PGS_R2(h2=0.4, N=1000, M=200)
+    assert np.isclose(observed, expected)

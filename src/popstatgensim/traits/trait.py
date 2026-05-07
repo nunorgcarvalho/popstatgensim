@@ -827,9 +827,9 @@ class Trait:
             standardize_y=standardize_y,
             detailed_output=detailed_output,
             verbose=verbose,
+            trait_name=self.name,
+            standardize_geno=standardize_geno,
         )
-        out['trait_name'] = self.name
-        out['standardize_geno'] = bool(standardize_geno)
         return out
 
     def get_components_matrix(self, exclude = None, include_y = True) -> np.ndarray:
