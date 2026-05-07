@@ -10,6 +10,7 @@ from popstatgensim.estimation import (
 )
 from popstatgensim import run_EO_AM, run_HEreg, run_REML
 from popstatgensim.traits import build_design_matrix_from_groups
+from popstatgensim.utils import fit_linear_regression
 
 
 def test_estimation_entrypoints_work_from_refactored_api():
@@ -34,6 +35,43 @@ def test_estimation_entrypoints_work_from_refactored_api():
     assert len(out_reml["var_comps"]["est"]) == 2
     assert np.isfinite(out_he["var_comps"]["est"]).all()
     assert np.isfinite(out_reml["var_comps"]["est"]).all()
+
+
+def test_fit_linear_regression_reports_core_ols_outputs():
+    y = np.array([1.0, 2.5, 1.5, 4.0, 3.5], dtype=float)
+    x = np.array(
+        [
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [2.0, 1.0],
+            [3.0, 0.0],
+            [4.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+    out = fit_linear_regression(y=y, X=x, add_intercept=True)
+
+    design = np.column_stack((np.ones(y.shape[0]), x))
+    xtx_inv = np.linalg.pinv(design.T @ design)
+    coef = xtx_inv @ (design.T @ y)
+    resid = y - design @ coef
+    rss = float(resid @ resid)
+    residual_var = rss / (y.shape[0] - design.shape[1])
+    vcov = residual_var * xtx_inv
+    se = np.sqrt(np.diag(vcov))
+
+    np.testing.assert_allclose(out.coef, coef)
+    np.testing.assert_allclose(out.coef_se, se)
+    np.testing.assert_allclose(out.coef_vcov, vcov)
+    assert out.n_samples == 5
+    assert out.n_predictors == 2
+    assert out.n_parameters == 3
+    assert out.dof_resid == 2
+    assert np.isclose(out.y_mean, y.mean())
+    assert np.isclose(out.y_var, y.var())
+    assert np.isclose(out.residual_var, residual_var)
+    assert np.isclose(out.rss, rss)
 
 
 def test_reml_warmstart_handles_design_matrix_random_effects():

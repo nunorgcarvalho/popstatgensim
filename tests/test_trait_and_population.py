@@ -725,6 +725,9 @@ def test_trait_run_gwas_matches_manual_ols_with_covariates():
     expected_covar_se = np.empty((pop.M, 1), dtype=float)
     expected_beta = np.empty(pop.M, dtype=float)
     expected_beta_se = np.empty(pop.M, dtype=float)
+    expected_vcov = np.empty((pop.M, 3, 3), dtype=float)
+    expected_residual_var = np.empty(pop.M, dtype=float)
+    expected_rss = np.empty(pop.M, dtype=float)
 
     for j in range(pop.M):
         X = np.column_stack((np.ones(pop.N), x, pop.G[:, j]))
@@ -740,6 +743,9 @@ def test_trait_run_gwas_matches_manual_ols_with_covariates():
         expected_covar_se[j, 0] = se[1]
         expected_beta[j] = coef[2]
         expected_beta_se[j] = se[2]
+        expected_vcov[j, :, :] = vcov
+        expected_residual_var[j] = sigma2
+        expected_rss[j] = float(resid @ resid)
 
     np.testing.assert_allclose(out.intercept_est, expected_intercepts)
     np.testing.assert_allclose(out.intercept_se, expected_intercept_se)
@@ -747,6 +753,12 @@ def test_trait_run_gwas_matches_manual_ols_with_covariates():
     np.testing.assert_allclose(out.covar_se, expected_covar_se)
     np.testing.assert_allclose(out.beta_est, expected_beta)
     np.testing.assert_allclose(out.beta_se, expected_beta_se)
+    np.testing.assert_allclose(out.coef_vcov, expected_vcov)
+    np.testing.assert_allclose(out.residual_var, expected_residual_var)
+    np.testing.assert_allclose(out.rss, expected_rss)
+    assert out.dof_resid == pop.N - 3
+    assert np.isclose(out.y_mean, y.mean())
+    assert np.isclose(out.y_var, y.var())
 
 
 def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
@@ -777,9 +789,15 @@ def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
     assert out.intercept_se is None
     assert out.covar_est is None
     assert out.covar_se is None
+    assert out.coef_vcov is None
+    assert out.residual_var is None
+    assert out.rss is None
     assert out.gamma_est is None
     assert out.gamma_se is None
     assert out.within_family is None
+    assert out.dof_resid == pop.N - 2
+    assert np.isclose(out.y_mean, y_std.mean())
+    assert np.isclose(out.y_var, y_std.var())
 
 
 def test_trait_run_gwas_within_family_gpar_reports_gamma_separately():

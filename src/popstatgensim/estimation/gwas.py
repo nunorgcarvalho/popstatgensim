@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .pgs import get_exp_PGS_R2
+from ..utils.stats import fit_linear_regression, standardize_vector
 
 
 @dataclass
@@ -38,6 +39,12 @@ class GWASresult:
     intercept_se: np.ndarray | None = None
     covar_est: np.ndarray | None = None
     covar_se: np.ndarray | None = None
+    coef_vcov: np.ndarray | None = None
+    dof_resid: int | None = None
+    y_mean: float | None = None
+    y_var: float | None = None
+    residual_var: np.ndarray | None = None
+    rss: np.ndarray | None = None
 
     def get_exp_PGS_R2(self, h2: float) -> float:
         """
@@ -85,15 +92,6 @@ def _validate_gwas_inputs(
     return y, G, covariates, G_par
 
 
-def _standardize_vector(values: np.ndarray, name: str) -> np.ndarray:
-    """Mean-center and variance-standardize a vector."""
-    mean = float(np.mean(values))
-    sd = float(np.std(values))
-    if not np.isfinite(sd) or sd == 0.0:
-        raise ValueError(f"Cannot standardize `{name}` because it has zero variance.")
-    return (values - mean) / sd
-
-
 def run_GWAS(
     y: np.ndarray,
     G: np.ndarray,
@@ -122,7 +120,7 @@ def run_GWAS(
     if within_family == 'Gpar' and G_par is None:
         raise ValueError("`G_par` must be provided when `within_family='Gpar'`.")
     if standardize_y:
-        y = _standardize_vector(y, name="y")
+        y = standardize_vector(y, name="y")
 
     n_samples, n_variants = G.shape
     n_covariates = 0 if covariates is None else covariates.shape[1]
@@ -130,9 +128,8 @@ def run_GWAS(
     if verbose:
         print("GWAS preprocessing: building design components.")
 
-    intercept = np.ones((n_samples, 1), dtype=float)
-    X_base = intercept if covariates is None else np.column_stack((intercept, covariates))
-    n_params = X_base.shape[1] + 1 + (1 if within_family == 'Gpar' else 0)
+    X_base = np.empty((n_samples, 0), dtype=float) if covariates is None else np.asarray(covariates, dtype=float)
+    n_params = 1 + X_base.shape[1] + 1 + (1 if within_family == 'Gpar' else 0)
     dof = n_samples - n_params
     if dof <= 0:
         raise ValueError(
@@ -156,6 +153,10 @@ def run_GWAS(
     else:
         covar_est = np.empty((n_variants, 0), dtype=float)
         covar_se = np.empty((n_variants, 0), dtype=float)
+    n_parameters = 1 + n_covariates + 1 + (1 if within_family == 'Gpar' else 0)
+    coef_vcov = np.empty((n_variants, n_parameters, n_parameters), dtype=float)
+    residual_var = np.empty(n_variants, dtype=float)
+    rss = np.empty(n_variants, dtype=float)
 
     progress_step = max(n_variants // 10, 1)
     if verbose:
@@ -171,24 +172,22 @@ def run_GWAS(
             X_j = np.column_stack((X_base, gpar_j, x_j))
         else:
             X_j = np.column_stack((X_base, x_j))
-        xtx_inv = np.linalg.pinv(X_j.T @ X_j)
-        beta_full = xtx_inv @ (X_j.T @ y)
-        resid = y - (X_j @ beta_full)
-        sigma2 = float(resid @ resid) / dof
-        vcov = sigma2 * xtx_inv
-        se_full = np.sqrt(np.clip(np.diag(vcov), 0.0, None))
+        fit = fit_linear_regression(y=y, X=X_j, add_intercept=True)
 
-        intercept_est[j] = beta_full[0]
-        intercept_se[j] = se_full[0]
+        intercept_est[j] = fit.coef[0]
+        intercept_se[j] = fit.coef_se[0]
         covar_stop = 1 + n_covariates
         if n_covariates > 0:
-            covar_est[j, :] = beta_full[1:covar_stop]
-            covar_se[j, :] = se_full[1:covar_stop]
+            covar_est[j, :] = fit.coef[1:covar_stop]
+            covar_se[j, :] = fit.coef_se[1:covar_stop]
         if within_family == 'Gpar':
-            gamma_est[j] = beta_full[covar_stop]
-            gamma_se[j] = se_full[covar_stop]
-        beta_est[j] = beta_full[-1]
-        beta_se[j] = se_full[-1]
+            gamma_est[j] = fit.coef[covar_stop]
+            gamma_se[j] = fit.coef_se[covar_stop]
+        beta_est[j] = fit.coef[-1]
+        beta_se[j] = fit.coef_se[-1]
+        coef_vcov[j, :, :] = fit.coef_vcov
+        residual_var[j] = fit.residual_var
+        rss[j] = fit.rss
 
     return GWASresult(
         trait_name=trait_name,
@@ -207,6 +206,12 @@ def run_GWAS(
         intercept_se=intercept_se if detailed_output else None,
         covar_est=covar_est if detailed_output else None,
         covar_se=covar_se if detailed_output else None,
+        coef_vcov=coef_vcov if detailed_output else None,
+        dof_resid=int(dof),
+        y_mean=float(np.mean(y)),
+        y_var=float(np.var(y)),
+        residual_var=residual_var if detailed_output else None,
+        rss=rss if detailed_output else None,
     )
 
 

@@ -7,6 +7,7 @@ from typing import Sequence
 import numpy as np
 
 from ..genome.pca import compute_PCA
+from ..utils.stats import fit_linear_regression, standardize_vector
 
 
 def _normalize_chrom_idx(chrom_idx: Sequence[int] | np.ndarray, M: int) -> np.ndarray:
@@ -25,41 +26,6 @@ def _normalize_chrom_idx(chrom_idx: Sequence[int] | np.ndarray, M: int) -> np.nd
     if np.any(chrom_idx < 0) or np.any(chrom_idx >= M):
         raise ValueError(f'`chrom_idx` entries must lie between 0 and {M - 1}.')
     return chrom_idx
-
-
-def _standardize_vector(values: np.ndarray, name: str) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
-    if values.ndim != 1:
-        raise ValueError(f'`{name}` must be a 1D array.')
-    sd = float(values.std())
-    if not np.isfinite(sd) or np.isclose(sd, 0.0):
-        raise ValueError(f'`{name}` has zero variance and cannot be standardized.')
-    return (values - values.mean()) / sd
-
-
-def _fit_linear_regression(y: np.ndarray, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Fits OLS and returns coefficient estimates with standard errors."""
-    y = np.asarray(y, dtype=float)
-    X = np.asarray(X, dtype=float)
-    if y.ndim != 1:
-        raise ValueError('`y` must be a 1D array.')
-    if X.ndim != 2:
-        raise ValueError('`X` must be a 2D array.')
-    if X.shape[0] != y.shape[0]:
-        raise ValueError('`X` and `y` must have the same number of rows.')
-
-    n_samples, n_params = X.shape
-    dof = n_samples - n_params
-    if dof <= 0:
-        raise ValueError('Not enough samples to fit the even-odd regression.')
-
-    xtx_inv = np.linalg.pinv(X.T @ X)
-    beta = xtx_inv @ (X.T @ y)
-    resid = y - (X @ beta)
-    sigma2 = float(resid @ resid) / dof
-    vcov = sigma2 * xtx_inv
-    se = np.sqrt(np.clip(np.diag(vcov), 0.0, None))
-    return beta, se
 
 
 def _compute_predictor_pcs(G: np.ndarray, n_pcs: int, standardized_geno: bool) -> np.ndarray:
@@ -129,8 +95,8 @@ def run_EO_AM(
 
     pgs_odd = X[:, odd_mask] @ pgs_weights[odd_mask]
     pgs_even = X[:, even_mask] @ pgs_weights[even_mask]
-    pgs_odd = _standardize_vector(pgs_odd, name='odd PGS')
-    pgs_even = _standardize_vector(pgs_even, name='even PGS')
+    pgs_odd = standardize_vector(pgs_odd, name='odd PGS')
+    pgs_even = standardize_vector(pgs_even, name='even PGS')
 
     if even_against_odd:
         y = pgs_even
@@ -151,18 +117,17 @@ def run_EO_AM(
         standardized_geno=standardized_geno,
     )
 
-    intercept = np.ones((X.shape[0], 1), dtype=float)
-    design = np.column_stack([intercept, predictor[:, None], covariates])
-    beta, se = _fit_linear_regression(y=y, X=design)
+    design = np.column_stack([predictor[:, None], covariates])
+    fit = fit_linear_regression(y=y, X=design, add_intercept=True)
 
     covariate_names = [f'PC{i}' for i in range(1, covariates.shape[1] + 1)]
     return {
-        'theta_est': float(beta[1]),
-        'theta_se': float(se[1]),
-        'intercept_est': float(beta[0]),
-        'intercept_se': float(se[0]),
-        'covar_est': np.asarray(beta[2:], dtype=float),
-        'covar_se': np.asarray(se[2:], dtype=float),
+        'theta_est': float(fit.coef[1]),
+        'theta_se': float(fit.coef_se[1]),
+        'intercept_est': float(fit.coef[0]),
+        'intercept_se': float(fit.coef_se[0]),
+        'covar_est': np.asarray(fit.coef[2:], dtype=float),
+        'covar_se': np.asarray(fit.coef_se[2:], dtype=float),
         'covariate_names': covariate_names,
         'n_covariates': int(covariates.shape[1]),
         'even_against_odd': bool(even_against_odd),
