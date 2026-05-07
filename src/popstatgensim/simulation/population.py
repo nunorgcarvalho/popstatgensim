@@ -42,7 +42,7 @@ class PopulationParams:
     related_offspring: bool = True
     s: Union[float, np.ndarray] = 0.0
     mu: Union[float, np.ndarray] = 0.0
-    n_offspring_dist: str = 'poisson'
+    n_offspring_dist: str = 'constant'
     AM_r: float = 0.0
     AM_trait: Union[str, np.ndarray, None] = None
     AM_type: str = 'phenotypic'
@@ -1372,7 +1372,7 @@ class Population:
         return ((iMs, iPs), spouse_idx)
 
     def _sample_offspring_pair_counts(self, P_mate: np.ndarray, N_offspring: int,
-                                      n_offspring_dist: str = 'poisson') -> np.ndarray:
+                                      n_offspring_dist: str = 'constant') -> np.ndarray:
         '''
         Draws the number of offspring assigned to each mate pair.
 
@@ -1381,7 +1381,7 @@ class Population:
             N_offspring (int): Total number of offspring to allocate across mate pairs.
             n_offspring_dist (str): Distribution of offspring counts across mate pairs.
                 Supported values are:
-                - 'poisson': Current behavior, equivalent to sampling each offspring's
+                - 'poisson': Equivalent to sampling each offspring's
                   mate pair independently from `P_mate`.
                 - 'constant': Allocates offspring as evenly as possible across mate
                   pairs by taking `floor(N_offspring * P_mate)` and then assigning one
@@ -1681,9 +1681,9 @@ class Population:
             mu (float or 1D array): Mutation rate, such that the probability of any individual allele flipping to its alternate in the next generation is given by mu. Occurs after selection (i.e. mutation occurs in germline of current generation). Default is 0 (no mutations).
             n_offspring_dist (str): Distribution of offspring counts across mate
                 pairs. Supported values are:
-                - 'poisson' (default): Current implementation, where each offspring's
+                - 'poisson': Each offspring's
                   mate pair is sampled independently from the pair weights.
-                - 'constant': Allocates offspring as evenly as possible across mate
+                - 'constant' (default): Allocates offspring as evenly as possible across mate
                   pairs by taking the floor of each pair's expected offspring count and
                   randomly adding one extra offspring to some pairs until the total
                   reaches the target.
