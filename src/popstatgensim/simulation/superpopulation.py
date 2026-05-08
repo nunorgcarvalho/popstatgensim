@@ -460,7 +460,9 @@ class SuperPopulation:
                          admix_fractions: list = None,
                          return_obj: bool = False):
         '''
-        Joins multiple populations into a single population. Inactivates the original populations and creates a new population from the merged haplotypes. The new population is added to the superpopulation as an active population.
+        Joins multiple populations into a single population. By default, the
+        original populations are inactivated and the joined population is added
+        to the superpopulation as a new active population.
         Parameters:
             pop_i (list): List of indices of populations to join. If None, joins all active populations.
             shared_haplotypes (bool): Whether haplotype IDs already refer to the same underlying founders across populations. If False, each population's non-negative haplotype IDs are shifted to remain unique after joining. Default is False.
@@ -468,8 +470,9 @@ class SuperPopulation:
             Ns (list): Optional per-population sample sizes. If provided, each selected source population is randomly subset to the corresponding size before joining. The sum must be even.
             N_new (int): Optional total size of a newly admixed joined population. Must be provided together with `admix_fractions`, and cannot be used with `Ns`.
             admix_fractions (list): Optional per-population admixture fractions. Must have the same length as `pop_i` and add up to 1. Fractions are converted to integer counts that sum to `N_new`.
-            return_obj (bool): If True, returns the new joined Population object after
-                adding it to the superpopulation. Default is False.
+            return_obj (bool): If True, returns the new joined Population object
+                without adding it to the superpopulation or changing any active
+                or inactive population status. Default is False.
         '''
         pop_i = self._resolve_population_indices(pop_i)
         pops = [self.pops[i] for i in pop_i]
@@ -499,7 +502,9 @@ class SuperPopulation:
             shared_haplotypes=shared_haplotypes,
             keep_past_generations=keep_past_generations
         )
-        
+        if return_obj:
+            return new_pop
+
         # updates superpopulation
         self.add_population(new_pop, active_new=True, update_era=False)
         self.inactivate_population(pop_i)
@@ -508,8 +513,6 @@ class SuperPopulation:
         for i in pop_i:
             # updates graph to reflect that the populations are now joined
             self.graph[i, len(self.pops)-1] = 1
-        if return_obj:
-            return new_pop
 
     def split_population(self, pop_i: int, N_new: Union[int, list] = 2):
         '''

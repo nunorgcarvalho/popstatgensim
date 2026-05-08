@@ -332,11 +332,16 @@ def test_join_populations_can_return_joined_population_object():
         for idx in range(2)
     ]
     spop = psg.SuperPopulation(pops)
+    n_before = len(spop.pops)
+    active_before = spop.active.copy()
+    graph_before = spop.graph.copy()
 
     joined = spop.join_populations(return_obj=True)
 
-    assert joined is spop.pops[-1]
     assert joined.N == 8
+    assert len(spop.pops) == n_before
+    assert spop.active == active_before
+    np.testing.assert_array_equal(spop.graph, graph_before)
 
 
 def test_join_populations_inherits_first_population_params_and_warns_on_mismatch():
