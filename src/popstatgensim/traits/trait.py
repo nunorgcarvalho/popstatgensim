@@ -9,6 +9,7 @@ from typing import Union
 import numpy as np
 
 from ..estimation.gwas import run_GWAS as _run_GWAS
+from ..genome.pca import compute_PCA
 from . import effect_sampling as sampling
 from .effects import Effect, FixedEffect, GeneticEffect, NoiseEffect, RandomEffect
 from .pgs import simulate_pgs_standardized_weights
@@ -809,6 +810,7 @@ class Trait:
         )
 
     def run_GWAS(self, covariates: np.ndarray = None,
+                 adjust_PCs: int = 0,
                  within_family: str = None,
                  standardize_y: bool = True,
                  standardize_geno: bool = True,
@@ -816,9 +818,23 @@ class Trait:
                  verbose: bool = False):
         '''
         Runs a univariate GWAS for this trait across all current-generation variants.
+
+        Parameters
+        ----------
+        covariates : np.ndarray, optional
+            Optional user-supplied covariates with shape (N, C).
+        adjust_PCs : int, default 0
+            If positive, automatically computes the first `adjust_PCs`
+            principal components of the current sample and appends them to the
+            regression covariates. These PCs are always computed from the
+            population's standardized genotype matrix, regardless of whether
+            the GWAS itself uses standardized genotypes or raw dosages.
         '''
         if self.pop is None:
             raise ValueError("Trait.run_GWAS() requires the trait to be attached to a Population.")
+        adjust_PCs = int(adjust_PCs)
+        if adjust_PCs < 0:
+            raise ValueError("`adjust_PCs` must be non-negative.")
 
         G = self.pop.X if standardize_geno else self.pop.G
         G_par = None
@@ -826,6 +842,22 @@ class Trait:
             if within_family != 'Gpar':
                 raise ValueError("`within_family` must be None or 'Gpar'.")
             G_par = self.pop.get_Gpar()
+
+        if covariates is not None:
+            covariates = np.asarray(covariates, dtype=float)
+            if covariates.ndim != 2:
+                raise ValueError("`covariates` must be a 2D array with shape (N, C).")
+            if covariates.shape[0] != self.pop.N:
+                raise ValueError("`covariates` must have the same number of rows as the population size.")
+
+        if adjust_PCs > 0:
+            pca = compute_PCA(X=np.asarray(self.pop.X, dtype=float), n_components=adjust_PCs)
+            pc_covariates = np.asarray(pca.scores[:, :adjust_PCs], dtype=float)
+            covariates = (
+                pc_covariates if covariates is None
+                else np.column_stack((covariates, pc_covariates))
+            )
+
         out = _run_GWAS(
             y=self.y,
             G=G,

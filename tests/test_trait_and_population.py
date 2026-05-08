@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import popstatgensim as psg
+from popstatgensim.genome import compute_PCA
 from popstatgensim.traits import (
     FixedEffect,
     GeneticEffect,
@@ -41,7 +42,13 @@ def test_fixed_effect_raises_when_input_name_is_ambiguous_between_trait_and_inpu
 
 
 def test_fixed_effect_can_use_parent_mean_of_same_trait_from_previous_generation():
-    pop = psg.Population(N=6, M=4, p_init=0.3, seed=32, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=4,
+        p_init=0.3,
+        seed=32,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
     base_values = np.linspace(-1.0, 1.0, pop.N)
     pop.add_trait_from_fixed_values(name="y", y=base_values, trait_type="permanent")
     pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
@@ -86,7 +93,13 @@ def test_fixed_effect_parent_trait_uses_zeros_when_past_generation_is_unavailabl
 
 
 def test_fixed_effect_can_use_parent_component_and_var_scaling():
-    pop = psg.Population(N=6, M=5, p_init=0.3, seed=33, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=5,
+        p_init=0.3,
+        seed=33,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
     pop.set_params(R_type="blocks")
     x = np.linspace(0.0, 1.0, pop.N)
     pop.add_trait(
@@ -139,7 +152,13 @@ def test_trait_reports_when_effect_requires_per_generation_updates():
 
 
 def test_multigeneration_simulation_requires_trait_updates_for_parent_phenotype_effects():
-    pop = psg.Population(N=6, M=4, p_init=0.3, seed=334, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=4,
+        p_init=0.3,
+        seed=334,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
     pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
     pop.add_trait(
         name="z",
@@ -159,7 +178,13 @@ def test_multigeneration_simulation_requires_trait_updates_for_parent_phenotype_
 
 
 def test_multigeneration_simulation_allows_trait_updates_for_parent_phenotype_effects():
-    pop = psg.Population(N=6, M=4, p_init=0.3, seed=335, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=4,
+        p_init=0.3,
+        seed=335,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
     pop.add_trait_from_fixed_values(name="y", y=np.linspace(-1.0, 1.0, pop.N), trait_type="permanent")
     pop.add_trait(
         name="z",
@@ -360,6 +385,29 @@ def test_join_populations_inherits_first_population_params_and_warns_on_mismatch
     assert joined.params.mu == pops[0].params.mu
     assert joined.params.R_type == pops[0].params.R_type
     np.testing.assert_allclose(joined.params.R, pops[0].params.R)
+
+
+def test_join_populations_defaults_keep_past_generations_from_first_population():
+    pops = [
+        psg.Population(
+            N=4,
+            M=5,
+            p_init=0.3,
+            seed=idx,
+            params=psg.PopulationParams(keep_past_generations=1),
+        )
+        for idx in range(2)
+    ]
+    for pop in pops:
+        pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
+    spop = psg.SuperPopulation(pops)
+
+    joined = spop.join_populations(return_obj=True)
+
+    assert joined.keep_past_generations == 1
+    assert joined.past is not None
+    assert len(joined.past) >= 2
+    assert joined.past[1] is not None
 
 
 def test_join_populations_rejects_odd_Ns_total():
@@ -581,6 +629,24 @@ def test_random_effect_seed_is_deterministic_and_static_kernel_is_dropped_on_sub
     assert subset.params.AM_r == pop.params.AM_r
     assert subset.params.R_type == pop.params.R_type
     np.testing.assert_allclose(subset.params.R, pop.params.R)
+
+
+def test_subset_individuals_defaults_keep_past_generations_from_params():
+    pop = psg.Population(
+        N=8,
+        M=5,
+        p_init=0.3,
+        seed=12,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
+    pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
+
+    subset = pop.subset_individuals(np.arange(pop.N - 2))
+
+    assert subset.keep_past_generations == 1
+    assert subset.past is not None
+    assert len(subset.past) >= 2
+    assert subset.past[1] is not None
 
 
 def test_simulating_new_generation_drops_static_random_effects():
@@ -805,6 +871,64 @@ def test_trait_run_gwas_uses_standardized_genotypes_and_standardized_trait():
     assert np.isclose(out.y_var, y_std.var())
 
 
+def test_trait_run_gwas_adjust_pcs_adds_sample_pcs_as_covariates():
+    pop = psg.Population(N=8, M=4, p_init=0.3, seed=52)
+    y = np.array([0.2, 1.1, -0.4, 0.9, 1.7, -1.2, 0.5, 1.3], dtype=float)
+    pop.add_trait_from_fixed_values(name="y", y=y)
+
+    out = pop.traits["y"].run_GWAS(
+        adjust_PCs=2,
+        standardize_y=False,
+        standardize_geno=True,
+        detailed_output=True,
+    )
+
+    pca = compute_PCA(X=np.asarray(pop.X, dtype=float), n_components=2)
+    pcs = np.asarray(pca.scores[:, :2], dtype=float)
+    expected_covar = np.empty((pop.M, 2), dtype=float)
+    expected_covar_se = np.empty((pop.M, 2), dtype=float)
+    for j in range(pop.M):
+        X = np.column_stack((np.ones(pop.N), pcs, np.asarray(pop.X[:, j], dtype=float)))
+        xtx_inv = np.linalg.pinv(X.T @ X)
+        coef = xtx_inv @ (X.T @ y)
+        resid = y - X @ coef
+        sigma2 = float(resid @ resid) / (pop.N - X.shape[1])
+        vcov = sigma2 * xtx_inv
+        se = np.sqrt(np.diag(vcov))
+        expected_covar[j, :] = coef[1:3]
+        expected_covar_se[j, :] = se[1:3]
+
+    assert out.n_covariates == 2
+    np.testing.assert_allclose(out.covar_est, expected_covar)
+    np.testing.assert_allclose(out.covar_se, expected_covar_se)
+
+
+def test_trait_run_gwas_adjust_pcs_appends_to_user_covariates():
+    pop = psg.Population(N=8, M=3, p_init=0.3, seed=53)
+    y = np.array([1.2, -0.3, 0.4, 1.0, -1.1, 0.2, 0.8, -0.6], dtype=float)
+    x = np.linspace(-1.0, 1.0, pop.N)
+    pop.add_trait_from_fixed_values(name="y", y=y)
+
+    out = pop.traits["y"].run_GWAS(
+        covariates=x[:, None],
+        adjust_PCs=1,
+        standardize_y=False,
+        standardize_geno=False,
+        detailed_output=True,
+    )
+
+    pca = compute_PCA(X=np.asarray(pop.X, dtype=float), n_components=1)
+    pcs = np.asarray(pca.scores[:, :1], dtype=float)
+    expected_covar = np.empty((pop.M, 2), dtype=float)
+    for j in range(pop.M):
+        X = np.column_stack((np.ones(pop.N), x[:, None], pcs, np.asarray(pop.G[:, j], dtype=float)))
+        coef = np.linalg.pinv(X.T @ X) @ (X.T @ y)
+        expected_covar[j, :] = coef[1:3]
+
+    assert out.n_covariates == 2
+    np.testing.assert_allclose(out.covar_est, expected_covar)
+
+
 def test_trait_run_gwas_within_family_gpar_reports_gamma_separately():
     pop = psg.Population(N=8, M=3, p_init=0.3, seed=43)
     x = np.linspace(-1.0, 1.0, pop.N)
@@ -928,7 +1052,13 @@ def test_impute_gpar_af_pcs_matches_pca_reconstruction_formula():
 
 
 def test_impute_gpar_compute_error_uses_shared_matrix_metrics():
-    pop = psg.Population(N=6, M=5, p_init=0.3, seed=21, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=5,
+        p_init=0.3,
+        seed=21,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
     pop.simulate_generations(generations=1, related_offspring=True, trait_updates=False)
 
     result = pop.impute_Gpar(method="AF_pop", compute_error=True)
@@ -955,6 +1085,12 @@ def test_population_params_store_R_without_pop_R_attribute():
     assert not hasattr(pop, "R")
     assert pop.params.R_type == "indep"
     np.testing.assert_allclose(pop.params.R, np.full(pop.M, 0.5))
+    assert pop.params.keep_past_generations == 1
+    assert pop.params.track_pedigree is False
+    assert pop.params.track_haplotypes is False
+    assert pop.params.metric_retention == "store_every"
+    assert pop.params.metric_last_k is None
+    assert pop.params.trait_updates is True
 
     pop.set_params(R=0.25)
     assert pop.params.R_type == "custom"
@@ -979,13 +1115,18 @@ def test_population_set_params_R_type_regenerates_R_from_genome_structure():
     np.testing.assert_allclose(pop.params.R, np.full(pop.M, 0.5))
 
 
-def test_population_init_rejects_R_type_argument():
+def test_population_init_rejects_legacy_storage_arguments():
     with pytest.raises(TypeError):
-        psg.Population(N=6, M=4, p_init=0.3, R_type="blocks")
-
+        psg.Population(N=6, M=4, p_init=0.3, keep_past_generations=1)
 
 def test_simulate_generations_uses_params_with_temporary_overrides(monkeypatch):
-    pop = psg.Population(N=6, M=4, p_init=0.3, seed=221, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=4,
+        p_init=0.3,
+        seed=221,
+        params=psg.PopulationParams(keep_past_generations=1, trait_updates=True),
+    )
     pop.set_params(
         related_offspring=False,
         s=0.2,
@@ -1029,6 +1170,25 @@ def test_simulate_generations_uses_params_with_temporary_overrides(monkeypatch):
     assert pop.params.n_offspring_dist == "constant"
 
 
+def test_simulate_generations_defaults_to_trait_updates_from_params(monkeypatch):
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=223)
+    calls = []
+
+    def fake_next_generation(s, mu):
+        return pop.H.copy()
+
+    def fake_update_traits(traits=None):
+        calls.append(traits)
+
+    monkeypatch.setattr(pop, "next_generation", fake_next_generation)
+    monkeypatch.setattr(pop, "update_traits", fake_update_traits)
+    pop.set_params(related_offspring=False, trait_updates=True)
+
+    pop.simulate_generations(generations=1)
+
+    assert calls == [None]
+
+
 def test_constant_offspring_distribution_balances_noninteger_expected_counts():
     pop = psg.Population(N=6, M=4, p_init=0.3, seed=23)
 
@@ -1052,7 +1212,13 @@ def test_generate_offspring_constant_distribution_gives_two_children_per_pair_wh
 
 
 def test_simulate_generations_passes_constant_offspring_distribution():
-    pop = psg.Population(N=6, M=4, p_init=0.3, seed=25, keep_past_generations=1)
+    pop = psg.Population(
+        N=6,
+        M=4,
+        p_init=0.3,
+        seed=25,
+        params=psg.PopulationParams(keep_past_generations=1),
+    )
 
     pop.simulate_generations(
         generations=1,

@@ -46,6 +46,12 @@ class PopulationParams:
     AM_r: float = 0.0
     AM_trait: Union[str, np.ndarray, None] = None
     AM_type: str = 'phenotypic'
+    keep_past_generations: int = 1
+    track_pedigree: bool = False
+    track_haplotypes: bool = False
+    metric_retention: str = 'store_every'
+    metric_last_k: Optional[int] = None
+    trait_updates: bool = True
 
 
 class Population:
@@ -59,11 +65,7 @@ class Population:
 
     def __init__(self, N: int, M: int, P: int = 2,
                  p_init: Union[float, np.ndarray] = None,
-                 keep_past_generations: int = 1,
-                 track_pedigree: bool = False,
-                 track_haplotypes: bool = False,
-                 metric_retention: str = 'store_every',
-                 metric_last_k: int = None,
+                 params: Union[PopulationParams, dict, None] = None,
                  seed: int = None):
         '''
         Initializes a population, simulating initial genotypes from specified allele frequencies.
@@ -72,11 +74,8 @@ class Population:
             M (int): Total number of variants in genome.
             P (int): Ploidy of genotpes. Default is 2 (diploid).
             p_init (float or array): Initial allele frequency of variants. If only a single value is provided, it is treated as the initial allele frequency for all variants. Alternatively, can be an array of length M for variant-specfic allele frequencies. If not provided, default is uniform distribution of allele frequencies between 0.05 and 0.95.
-            keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
-            track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
-            track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
-            metric_retention (str): How metric histories are retained over time. Options are 'store_every', 'store_last_k', 'summary_only', and 'disabled'. Default is 'store_every'.
-            metric_last_k (int): Number of most recent generations to retain when `metric_retention='store_last_k'`.
+            params (PopulationParams or dict): Optional parameter object used to
+                initialize simulation, tracking, and storage settings.
             seed (int): Initial seed to use when simulating genotypes (and allele frequencies if necessary).
         '''
         # sets seed if specified
@@ -96,29 +95,18 @@ class Population:
         # passes haplotype to base constructor for further initialization
         self._initialize_H(
             H,
-            keep_past_generations=keep_past_generations,
-            track_pedigree=track_pedigree,
-            track_haplotypes=track_haplotypes,
-            metric_retention=metric_retention,
-            metric_last_k=metric_last_k,
+            params=params,
         )
     
     @classmethod
     def from_H(cls, H: np.ndarray,
-               keep_past_generations: int = 1,
-               track_pedigree: bool = False,
-               track_haplotypes: bool = False,
-               metric_retention: str = 'store_every',
-               metric_last_k: int = None):
+               params: Union[PopulationParams, dict, None] = None):
         '''
         Initializes a population from a given haplotype array.
         Parameters:
             H (3D array): N*M*P array of haplotypes. First dimension is individuals, second dimension is variants, and third dimension is haplotype number (related to ploidy). Each element is either a 0 or a 1.
-            keep_past_generations (int): Number of past generations to keep in the object. Default is 1, meaning the past generation is kept (on top of the current generation).
-            track_pedigree (bool): Whether to track pedigree information (stored in Population.ped). Must keep at least 1 past generation. Default is False.
-            track_haplotypes (bool): Whether to store haplotype IDs for founder/IBD tracking. Default is False.
-            metric_retention (str): Metric retention policy. See `Population.__init__()`.
-            metric_last_k (int): Number of retained generations when `metric_retention='store_last_k'`.
+            params (PopulationParams or dict): Optional parameter object used to
+                initialize simulation, tracking, and storage settings.
         Returns:
             Population: A new Population object initialized with the given haplotype array.
         '''
@@ -127,20 +115,12 @@ class Population:
         # initializes the object with the given haplotype array
         pop._initialize_H(
             H,
-            keep_past_generations=keep_past_generations,
-            track_pedigree=track_pedigree,
-            track_haplotypes=track_haplotypes,
-            metric_retention=metric_retention,
-            metric_last_k=metric_last_k,
+            params=params,
         )
         return pop
 
     def _initialize_H(self, H: np.ndarray,
-                      keep_past_generations: int = 1,
-                      track_pedigree: bool = False,
-                      track_haplotypes: bool = False,
-                      metric_retention: str = 'store_every',
-                      metric_last_k: int = None):
+                      params: Union[PopulationParams, dict, None] = None):
         '''
         Initializes a population from a given haplotype array. See the `from_H` class method for details.
         '''
@@ -162,15 +142,13 @@ class Population:
         self._X_dtype = np.float32
         self.params.R = self._generate_R_from_type(self.params.R_type)
         self.K = np.diag(np.ones(self.N)) # kinship matrix (initially identity, not functional yet)
-        self.track_pedigree = track_pedigree # whether to track pedigree information
-        self.track_haplotypes = bool(track_haplotypes)
-        self.metric_retention = metric_retention
-        self.metric_last_k = metric_last_k
         # how many past generations to keep in memory
         self.past = [self]
-        self.update_keep_past_gens(keep_past_generations=keep_past_generations)
+        self.update_keep_past_gens(keep_past_generations=self.params.keep_past_generations)
+        if params is not None:
+            self.set_params(params=params)
         Haplos = None
-        if self.track_haplotypes:
+        if self.params.track_haplotypes:
             Haplos = np.full(H.shape, -1, dtype=np.int32)
 
         # further attributes
@@ -191,16 +169,80 @@ class Population:
         Parameters:
             keep_past_generations (int): Number of past generations to keep in the object.
         '''
+        keep_past_generations = int(keep_past_generations)
+        if keep_past_generations < 0:
+            raise ValueError('`keep_past_generations` must be non-negative.')
+        if self.params.track_pedigree and keep_past_generations < 1:
+            raise ValueError('Must keep at least 1 past generation to track pedigree.')
+
         current_past_gens = len(self.past) - 1 # should also just be self.keep_past_generations
         if keep_past_generations < current_past_gens:
             self.past = self.past[0:keep_past_generations + 1]
         elif keep_past_generations > current_past_gens:
             for _ in range(current_past_gens, keep_past_generations):
                 self.past.append(None) # initializes past generations' objects as None
-        elif keep_past_generations > 0:
-            warnings.warn(f'Number of past generations kept is already {keep_past_generations}')
-        
-        self.keep_past_generations = keep_past_generations
+        self.params.keep_past_generations = keep_past_generations
+
+    @property
+    def keep_past_generations(self) -> int:
+        return int(self.params.keep_past_generations)
+
+    @keep_past_generations.setter
+    def keep_past_generations(self, value: int):
+        self.set_params(keep_past_generations=value)
+
+    @property
+    def track_pedigree(self) -> bool:
+        return bool(self.params.track_pedigree)
+
+    @track_pedigree.setter
+    def track_pedigree(self, value: bool):
+        self.set_params(track_pedigree=value)
+
+    @property
+    def track_haplotypes(self) -> bool:
+        return bool(self.params.track_haplotypes)
+
+    @track_haplotypes.setter
+    def track_haplotypes(self, value: bool):
+        self.set_params(track_haplotypes=value)
+
+    @property
+    def metric_retention(self) -> str:
+        return str(self.params.metric_retention)
+
+    @metric_retention.setter
+    def metric_retention(self, value: str):
+        self.set_params(metric_retention=value)
+
+    @property
+    def metric_last_k(self) -> Optional[int]:
+        return self.params.metric_last_k
+
+    @metric_last_k.setter
+    def metric_last_k(self, value: Optional[int]):
+        self.set_params(metric_last_k=value)
+
+    @property
+    def trait_updates(self) -> bool:
+        return bool(self.params.trait_updates)
+
+    @trait_updates.setter
+    def trait_updates(self, value: bool):
+        self.set_params(trait_updates=value)
+
+    def _normalize_metric_retention(self, metric_retention: str, metric_last_k: Optional[int]) -> tuple[str, Optional[int]]:
+        metric_retention = str(metric_retention).strip().lower()
+        valid = {'store_every', 'store_last_k', 'summary_only', 'disabled'}
+        if metric_retention not in valid:
+            raise ValueError(f"Unknown metric retention policy: {metric_retention}")
+        if metric_last_k is not None:
+            metric_last_k = int(metric_last_k)
+            if metric_last_k <= 0:
+                raise ValueError('`metric_last_k` must be a positive integer when provided.')
+        if metric_retention == 'store_last_k' and (metric_last_k is None or metric_last_k <= 0):
+            raise ValueError("metric_last_k must be a positive integer when metric_retention='store_last_k'.")
+        return metric_retention, metric_last_k
 
 
     def _validate_R(self, R: Union[float, np.ndarray]) -> np.ndarray:
@@ -261,10 +303,76 @@ class Population:
             params.n_offspring_dist = str(value).strip().lower()
         elif name == 'AM_type':
             params.AM_type = str(value)
+        elif name == 'keep_past_generations':
+            keep_past_generations = int(value)
+            if keep_past_generations < 0:
+                raise ValueError('`keep_past_generations` must be non-negative.')
+            if params.track_pedigree and keep_past_generations < 1:
+                raise ValueError('Must keep at least 1 past generation to track pedigree.')
+            if params is self.params:
+                self.update_keep_past_gens(keep_past_generations)
+            else:
+                params.keep_past_generations = keep_past_generations
+        elif name == 'track_pedigree':
+            track_pedigree = bool(value)
+            if track_pedigree and params.keep_past_generations < 1:
+                raise ValueError('Must keep at least 1 past generation to track pedigree.')
+            params.track_pedigree = track_pedigree
+        elif name == 'track_haplotypes':
+            params.track_haplotypes = bool(value)
+            if params is self.params:
+                if params.track_haplotypes and hasattr(self, 'H') and getattr(self, 'Haplos', None) is None:
+                    self.Haplos = np.full(self.H.shape, -1, dtype=np.int32)
+                elif not params.track_haplotypes:
+                    self.Haplos = None
+        elif name == 'metric_retention':
+            metric_retention, metric_last_k = self._normalize_metric_retention(
+                value,
+                params.metric_last_k,
+            )
+            params.metric_retention = metric_retention
+            params.metric_last_k = metric_last_k
+        elif name == 'metric_last_k':
+            metric_retention, metric_last_k = self._normalize_metric_retention(
+                params.metric_retention,
+                value,
+            )
+            params.metric_retention = metric_retention
+            params.metric_last_k = metric_last_k
+        elif name == 'trait_updates':
+            params.trait_updates = bool(value)
         elif name in {'s', 'mu', 'AM_trait'}:
             setattr(params, name, self._copy_param_value(value))
         else:
             raise ValueError(f'Unknown population parameter: {name}.')
+
+    def _apply_param_updates(self, target: PopulationParams, updates: dict,
+                             update_r_type_for_R: bool = True):
+        field_order = [
+            'R_type',
+            'R',
+            'related_offspring',
+            's',
+            'mu',
+            'n_offspring_dist',
+            'AM_r',
+            'AM_trait',
+            'AM_type',
+            'keep_past_generations',
+            'track_pedigree',
+            'track_haplotypes',
+            'metric_last_k',
+            'metric_retention',
+            'trait_updates',
+        ]
+        for name in field_order:
+            if name in updates:
+                self._set_param_value(
+                    target,
+                    name,
+                    updates[name],
+                    update_r_type_for_R=update_r_type_for_R,
+                )
 
     def set_params(self, params: Union[PopulationParams, dict] = None, return_params: bool = False,
                    **kwargs) -> PopulationParams:
@@ -280,24 +388,24 @@ class Population:
         '''
         if params is not None:
             if isinstance(params, PopulationParams):
-                for field in fields(PopulationParams):
-                    self._set_param_value(
-                        self.params,
-                        field.name,
-                        self._copy_param_value(getattr(params, field.name)),
-                        update_r_type_for_R=False,
-                    )
+                self._apply_param_updates(
+                    self.params,
+                    {
+                        field.name: self._copy_param_value(getattr(params, field.name))
+                        for field in fields(PopulationParams)
+                    },
+                    update_r_type_for_R=False,
+                )
             elif isinstance(params, dict):
-                for name, value in params.items():
-                    self._set_param_value(self.params, name, value)
+                self._apply_param_updates(self.params, dict(params))
             else:
                 raise ValueError('`params` must be a PopulationParams object or dictionary.')
 
         valid_names = {field.name for field in fields(PopulationParams)}
-        for name, value in kwargs.items():
-            if name not in valid_names:
-                raise ValueError(f'Unknown population parameter: {name}.')
-            self._set_param_value(self.params, name, value)
+        unknown = sorted(name for name in kwargs if name not in valid_names)
+        if unknown:
+            raise ValueError(f"Unknown population parameter: {unknown[0]}.")
+        self._apply_param_updates(self.params, kwargs)
         if return_params:
             return self.params
 
@@ -306,21 +414,20 @@ class Population:
         resolved = copy.deepcopy(self.params)
         if params is not None:
             if isinstance(params, PopulationParams):
-                for field in fields(PopulationParams):
-                    self._set_param_value(
-                        resolved,
-                        field.name,
-                        self._copy_param_value(getattr(params, field.name)),
-                        update_r_type_for_R=False,
-                    )
+                self._apply_param_updates(
+                    resolved,
+                    {
+                        field.name: self._copy_param_value(getattr(params, field.name))
+                        for field in fields(PopulationParams)
+                    },
+                    update_r_type_for_R=False,
+                )
             elif isinstance(params, dict):
-                for name, value in params.items():
-                    self._set_param_value(resolved, name, value)
+                self._apply_param_updates(resolved, dict(params))
             else:
                 raise ValueError('`params` must be a PopulationParams object or dictionary.')
         if overrides:
-            for name, value in overrides.items():
-                self._set_param_value(resolved, name, value)
+            self._apply_param_updates(resolved, overrides)
         return resolved
 
     def _params_equal(self, other_params: PopulationParams) -> bool:
@@ -341,7 +448,7 @@ class Population:
         '''
         Generates a complementary haplotype array for each individual containing a haplotype identifier for each allele. This functions treats the current generation as founders (individuals are unrelated from each other) such that each of their chromosomes has a unique identifier for all alleles in it. Subsequent generations can then track the inheritance of these founding haplotypes. Haplotypes are given an integer in the order they appear in the haplotype array.
         '''
-        self.track_haplotypes = True
+        self.params.track_haplotypes = True
         ids = np.arange(self.N * self.P, dtype=np.int32).reshape(self.N, self.P)
         Haplos = np.broadcast_to(ids[:, None, :], self.H.shape).copy()
         self._update_obj(Haplos=Haplos)
@@ -364,7 +471,7 @@ class Population:
             self._X = np.asarray(value, dtype=self._X_dtype)
 
     def _require_haplotype_tracking(self):
-        if not self.track_haplotypes or self.Haplos is None:
+        if not self.params.track_haplotypes or self.Haplos is None:
             raise ValueError(
                 'Haplotype IDs are not stored for this population. '
                 'Initialize with track_haplotypes=True or call set_founding_haplotypes().'
@@ -695,15 +802,17 @@ class Population:
         raise ValueError("source must be either 'GRM' or 'IBD'.")
 
     def subset_individuals(self, i_keep: np.ndarray,
-                           keep_past_generations: int = 0) -> 'Population':
+                           keep_past_generations: int = None) -> 'Population':
         '''
         Returns a new Population object containing only the specified individuals.
         Parameters:
             i_keep (1D int or bool array): Individuals to retain. Boolean masks must
                 have length `Population.N`.
-            keep_past_generations (int): Number of past generations to preserve.
-                Parent generations are recursively subset to the ancestors referenced by
-                the retained individuals when available. Default is 0.
+            keep_past_generations (int): Optional override for the number of past
+                generations to preserve. If None, uses
+                `Population.params.keep_past_generations`. Parent generations are
+                recursively subset to the ancestors referenced by the retained
+                individuals when available.
         Returns:
             Population: Subsetted population.
         '''
@@ -723,18 +832,19 @@ class Population:
             raise IndexError('`i_keep` contains indices outside the population.')
         if np.unique(i_keep).size != i_keep.size:
             raise ValueError('`i_keep` cannot contain duplicate indices.')
+        if keep_past_generations is None:
+            keep_past_generations = self.keep_past_generations
 
         H_new = self.H[i_keep, :, :]
+        params_new = copy.deepcopy(self.params)
+        params_new.keep_past_generations = int(keep_past_generations)
+        if params_new.keep_past_generations < 1:
+            params_new.track_pedigree = False
         new_pop = Population.from_H(
             H_new,
-            keep_past_generations=keep_past_generations,
-            track_pedigree=self.track_pedigree and keep_past_generations > 0,
-            track_haplotypes=self.track_haplotypes,
-            metric_retention=self.metric_retention,
-            metric_last_k=self.metric_last_k,
+            params=params_new,
         )
 
-        new_pop.params = copy.deepcopy(self.params)
         new_pop.BPs = self.BPs.copy()
         new_pop.t = self.t
         new_pop.T_breaks = copy.deepcopy(self.T_breaks)
@@ -925,7 +1035,7 @@ class Population:
                                   source: str = 'GRM',
                                   relatedness: np.ndarray = None,
                                   standardize_ibd: bool = False,
-                                  keep_past_generations: int = 0,
+                                  keep_past_generations: int = None,
                                   return_indices: bool = False):
         '''
         Returns a subsetted population in which all retained pairs have relatedness at
@@ -937,8 +1047,9 @@ class Population:
             relatedness (2D array): Optional precomputed relatedness matrix.
             standardize_ibd (bool): Passed to `get_relatedness_matrix()` when
                 `source='IBD'`.
-            keep_past_generations (int): Number of past generations to preserve in the
-                returned population. Default is 0.
+            keep_past_generations (int): Optional override for the number of past
+                generations to preserve in the returned population. If None, uses
+                `Population.params.keep_past_generations`.
             return_indices (bool): If True, also returns the retained indices in the
                 original population.
         Returns:
@@ -1238,7 +1349,7 @@ class Population:
         return H
 
     def simulate_generations(self, generations: int = 1, related_offspring: bool = None,
-                             trait_updates: bool = False, verbose: bool = False,
+                             trait_updates: bool = None, verbose: bool = False,
                              n_offspring_dist: str = None,
                              params: Union[PopulationParams, dict] = None,
                              **kwargs):
@@ -1250,7 +1361,9 @@ class Population:
             related_offspring (bool): Optional one-run override for
                 `Population.params.related_offspring`. If false, future offspring
                 have alleles drawn randomly from allele frequencies.
-            trait_updates (bool): Whether to update traits after each generation. However, sex is always updated in each generation, regardless of this setting. Default is False, meaning that traits are only updated at the end of the simulation.
+            trait_updates (bool): Optional one-run override for
+                `Population.params.trait_updates`. However, sex is always updated
+                in each generation regardless.
             verbose (bool): Whether to print a progress message after each simulated generation. Default is False.
             n_offspring_dist (str): Optional one-run override for
                 `Population.params.n_offspring_dist`. Ignored when
@@ -1265,7 +1378,10 @@ class Population:
             overrides['related_offspring'] = related_offspring
         if n_offspring_dist is not None:
             overrides['n_offspring_dist'] = n_offspring_dist
+        if trait_updates is not None:
+            overrides['trait_updates'] = trait_updates
         sim_params = self._resolved_params(params=params, overrides=overrides)
+        trait_updates = sim_params.trait_updates
 
         uses_assortative_mating = (
             sim_params.AM_trait is not None and not np.isclose(sim_params.AM_r, 0.0)
@@ -1830,7 +1946,7 @@ class Population:
         pops_i = list(range(generations + 1))
         spop.join_populations(pops_i, shared_haplotypes=self.track_haplotypes)
         new_pop = spop.pops[-1] # the last population in the SuperPopulation is the combined one
-        new_pop.keep_past_generations = self.keep_past_generations
+        new_pop.set_params(keep_past_generations=self.keep_past_generations)
         new_pop.relations = pedigree_relations.initialize_relations(new_pop.N, N1=new_pop.N, parent_source='current')
 
         # updates relationship matrices in combined population

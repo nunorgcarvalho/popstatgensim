@@ -204,7 +204,7 @@ class SuperPopulation:
             self._update_era() # updates era, active indices, and history
 
     def _join_populations_build(self, pops: list, shared_haplotypes: bool = False,
-                                keep_past_generations: int = 0,
+                                keep_past_generations: int = None,
                                 generation: int = 0) -> Optional[Population]:
         '''
         Internal helper for joining population objects without mutating the superpopulation.
@@ -212,6 +212,8 @@ class SuperPopulation:
         '''
         if len(pops) < 2:
             raise ValueError("Must specify at least two populations to join.")
+        if keep_past_generations is None:
+            keep_past_generations = pops[0].keep_past_generations
 
         gen_pops = []
         for pop_i in pops:
@@ -232,13 +234,13 @@ class SuperPopulation:
             raise ValueError(
                 'shared_haplotypes=True requires haplotype IDs to be stored for every joined population.'
             )
+        params_new = copy.deepcopy(gen_pops[0].params)
+        params_new.keep_past_generations = int(keep_past_generations)
+        params_new.track_pedigree = bool(track_pedigree and keep_past_generations > 0)
+        params_new.track_haplotypes = bool(track_haplotypes)
         new_pop = Population.from_H(
             H,
-            keep_past_generations=keep_past_generations,
-            track_pedigree=track_pedigree,
-            track_haplotypes=track_haplotypes,
-            metric_retention=gen_pops[0].metric_retention,
-            metric_last_k=gen_pops[0].metric_last_k,
+            params=params_new,
         )
 
         # preserves shared genome metadata from the first population
@@ -248,7 +250,6 @@ class SuperPopulation:
                 "the joined population will inherit the first population's params.",
                 UserWarning,
             )
-        new_pop.params = copy.deepcopy(gen_pops[0].params)
         new_pop.BPs = gen_pops[0].BPs.copy()
         new_pop.t = gen_pops[0].t
         new_pop.T_breaks = copy.deepcopy(gen_pops[0].T_breaks)
@@ -438,7 +439,7 @@ class SuperPopulation:
         return self._validate_join_counts(pops, counts, 'admix-derived counts')
 
     def _sample_join_populations(self, pops: list, counts: list,
-                                 keep_past_generations: int) -> list:
+                                 keep_past_generations: int = None) -> list:
         '''
         Randomly samples individuals from each source population before joining.
         '''
@@ -454,7 +455,7 @@ class SuperPopulation:
         return sampled_pops
 
     def join_populations(self, pop_i: list = None, shared_haplotypes: bool = False,
-                         keep_past_generations: int = 0,
+                         keep_past_generations: int = None,
                          Ns: list = None,
                          N_new: int = None,
                          admix_fractions: list = None,
@@ -466,7 +467,12 @@ class SuperPopulation:
         Parameters:
             pop_i (list): List of indices of populations to join. If None, joins all active populations.
             shared_haplotypes (bool): Whether haplotype IDs already refer to the same underlying founders across populations. If False, each population's non-negative haplotype IDs are shifted to remain unique after joining. Default is False.
-            keep_past_generations (int): Number of previous generations to preserve in the joined population. If greater than 0, the specified populations' stored past generations are recursively joined and attached to the new population's `past` attribute.
+            keep_past_generations (int): Optional override for the number of
+                previous generations to preserve in the joined population. If
+                None, uses `Population.params.keep_past_generations` from the
+                first joined population. If greater than 0, the specified
+                populations' stored past generations are recursively joined and
+                attached to the new population's `past` attribute.
             Ns (list): Optional per-population sample sizes. If provided, each selected source population is randomly subset to the corresponding size before joining. The sum must be even.
             N_new (int): Optional total size of a newly admixed joined population. Must be provided together with `admix_fractions`, and cannot be used with `Ns`.
             admix_fractions (list): Optional per-population admixture fractions. Must have the same length as `pop_i` and add up to 1. Fractions are converted to integer counts that sum to `N_new`.
@@ -476,6 +482,8 @@ class SuperPopulation:
         '''
         pop_i = self._resolve_population_indices(pop_i)
         pops = [self.pops[i] for i in pop_i]
+        if keep_past_generations is None:
+            keep_past_generations = pops[0].keep_past_generations
 
         if Ns is not None and (N_new is not None or admix_fractions is not None):
             raise ValueError('`Ns` cannot be used together with `N_new` or `admix_fractions`.')
