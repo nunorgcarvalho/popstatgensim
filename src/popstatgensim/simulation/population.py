@@ -1448,6 +1448,27 @@ class Population:
         # saves metrics to object
         self._update_metric_history()
 
+    def _rescale_empirical_variance(self, values: np.ndarray, target_var: float,
+                                    name: str) -> np.ndarray:
+        '''
+        Mean-centers a vector and rescales it to have the requested empirical variance.
+        '''
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1 or values.shape[0] != self.N:
+            raise ValueError(f'`{name}` must be a 1D array of length N.')
+        target_var = float(target_var)
+        if target_var < 0:
+            raise ValueError(f'`{name}` target variance must be non-negative.')
+
+        centered = values - values.mean()
+        if np.isclose(target_var, 0.0):
+            return np.zeros_like(centered)
+
+        observed_var = float(np.var(centered))
+        if np.isclose(observed_var, 0.0):
+            raise ValueError(f'`{name}` has zero empirical variance and cannot be rescaled.')
+        return centered * np.sqrt(target_var / observed_var)
+
     def _pair_mates(self, AM_r: float = 0, AM_trait: Union[str, np.ndarray] = None,
                     AM_type: str = 'phenotypic') -> np.ndarray:
         '''
@@ -1481,8 +1502,12 @@ class Population:
                     AM_values = self.traits[AM_trait].y
                 elif AM_type == 'genetic':
                     AM_values = self.traits[AM_trait].y_['A']
-            # standardizes
-            AM_values = (AM_values - AM_values.mean()) / AM_values.std()
+            # standardizes to exact empirical variance 1
+            AM_values = self._rescale_empirical_variance(
+                AM_values,
+                target_var=1.0,
+                name='AM_values',
+            )
         else:
             AM_values = np.zeros(self.N)
 
@@ -1491,7 +1516,12 @@ class Population:
         iPs = np.random.choice(np.where(self.traits['sex'].y == 1)[0], N2, replace=False)
 
         # computes mate value
-        mate_values = AM_r * AM_values + np.random.normal(scale = np.sqrt(1-AM_r**2), size=self.N)
+        noise = self._rescale_empirical_variance(
+            np.random.normal(size=self.N),
+            target_var=1 - AM_r ** 2,
+            name='mate noise',
+        )
+        mate_values = AM_r * AM_values + noise
         # sorts mothers and fathers by mate value
         iMs = iMs[np.argsort(AM_values[iMs])]
         iPs = iPs[np.argsort(mate_values[iPs])]    

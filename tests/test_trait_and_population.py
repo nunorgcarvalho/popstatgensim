@@ -675,6 +675,49 @@ def test_simulating_new_generation_drops_static_random_effects():
     assert "static" not in trait.effects
 
 
+def test_rescale_empirical_variance_matches_requested_variance_exactly():
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=40)
+    values = np.array([1.0, -2.0, 3.0, 0.5, -1.5, 2.5], dtype=float)
+
+    standardized = pop._rescale_empirical_variance(values, target_var=1.0, name="x")
+    noise = pop._rescale_empirical_variance(values, target_var=0.36, name="x")
+
+    assert np.isclose(standardized.mean(), 0.0)
+    assert np.isclose(np.var(standardized), 1.0)
+    assert np.isclose(noise.mean(), 0.0)
+    assert np.isclose(np.var(noise), 0.36)
+
+
+def test_pair_mates_uses_exact_empirical_noise_variance_under_am(monkeypatch):
+    pop = psg.Population(N=6, M=4, p_init=0.3, seed=41)
+    pop.traits["sex"].y = np.array([0, 0, 0, 1, 1, 1], dtype=float)
+    pop.add_trait_from_fixed_values(name="am", y=np.array([-2.0, -0.5, 1.0, -1.5, 0.5, 2.0]))
+
+    calls = []
+    original_rescale = pop._rescale_empirical_variance
+
+    def wrapped_rescale(values, target_var, name):
+        out = original_rescale(values, target_var=target_var, name=name)
+        calls.append((name, float(target_var), float(np.var(out))))
+        return out
+
+    monkeypatch.setattr(pop, "_rescale_empirical_variance", wrapped_rescale)
+    monkeypatch.setattr(
+        np.random,
+        "choice",
+        lambda a, size, replace=False: np.asarray(a)[:size],
+    )
+
+    pop._pair_mates(AM_r=0.8, AM_trait="am")
+
+    assert calls[0][0] == "AM_values"
+    assert np.isclose(calls[0][1], 1.0)
+    assert np.isclose(calls[0][2], 1.0)
+    assert calls[1][0] == "mate noise"
+    assert np.isclose(calls[1][1], 1.0 - 0.8 ** 2)
+    assert np.isclose(calls[1][2], 1.0 - 0.8 ** 2)
+
+
 def test_random_effect_can_reference_existing_component():
     pop = psg.Population(N=6, M=4, p_init=0.3, seed=3)
     x = np.arange(pop.N, dtype=float)
