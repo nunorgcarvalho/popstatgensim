@@ -10,3 +10,6 @@ dist/
 *.o
 notebooks/benchmark_REML_04-10/cache/
 notebooks/benchmark_REML_04-10/results/
+
+# thesisMgr worker guidance (kept local; owned by the thesisMgr coordination repo)
+CLAUDE.md
