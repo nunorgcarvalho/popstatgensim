@@ -137,19 +137,30 @@ magnitude` (VT+popstrat+AM), which the sim sets.
 
 ---
 
-## 8. Analyzed-cohort scope (slice vs next increment)
-The default single-most-recent-generation cohort (monogamous-pair forward-sim) contains **FS (deg1),
-deg3 (1st cousins), and fine_deg (deg 4–11)** — verified: FS realized π ≈ 0.50, deg3 ≈ 0.125. It does
-**NOT** contain **PO or deg2** (parent-offspring / avuncular / grandparent / half-sib) — those are
-cross-generational. So slice v0 exercises GREML, sibreg, and the relreg parts not needing C_PO/C_eq2;
-PO/deg2 require a **multi-generation cohort** (pool final gen + parents [+ grandparents]) plus new
-cross-generation pedigree classification — the **next increment**, not a rebuild (exporters are
-cohort-agnostic).
+## 8. Analyzed-cohort scope  **[LOCKED — multi-generation default]**
+The analyzed cohort is the current generation **flattened with `cohort_generations` past generations**
+via `Population.flatten_generations(k)` — which pools genotypes/haplotypes (preserving cross-generation
+founder haplotype IDs so true-IBD works across generations) AND rebuilds the cross-generation Pedigree.
+Default `k=1` (current + parents) gives the full near-relative spectrum, verified against theory:
+**FS ≈ 0.50, PO ≈ 0.51, deg2 (avuncular) ≈ 0.26, deg3 (1st cousins) ≈ 0.13** — so `C_FS`, `C_PO`,
+`C_eq2`, `R_IBD*`, `d_IBD*` are all populated and every RelReg variant is exercised. Notes:
+- Each cohort member keeps its OWN realized phenotype (join concatenates, does not regenerate); the
+  causal architecture + chromosome map survive the join.
+- **Half-relatives are not produced** (monogamous pairing) — `deg2` is entirely avuncular. Half-sibs
+  would need multi-mate pairing (a future feature).
+- **Uneven per-generation subsampling** of the cohort is a future parameter (default = all individuals
+  of both generations).
+- `population.pkl` is the base generative Population; the cohort = `base_pop.flatten_generations(k)`
+  (`cohort_generations` recorded in `population.meta.json`).
 
 ## 9. Status
-Vertical slice (stylized B + AM) implemented and PASSING end-to-end on branch `sim-validation`:
-`examples/sim_validation_vertical_slice.py` → chr-split pgen (plink2-validated), ibd_pairs (FS≈0.50),
-phenotype, variants, truth JSONs, pickle. A durable handoff bundle:
-`/n/scratch/users/n/nur479/sim_validation/vertical_slice_v0/simB0001/`
-(N=1000, M=800, 2 chr, 6 gens AM_r=0.4; h2_dir≈0.52, h2_SNP_plim≈0.29, untyped_fraction≈0.45).
-Next: multi-generation cohort (PO/deg2) + real-founder paradigm (A) + population-structure/VT confounds.
+Vertical slice (stylized B + AM, **multi-generation cohort**) implemented and PASSING end-to-end on
+branch `sim-validation` (`examples/sim_validation_vertical_slice.py`): chr-split pgen (plink2-validated),
+ibd_pairs with FS/PO/deg2/deg3, phenotype, variants, truth JSONs (+ pedigree_edges), pickle. Durable
+handoff bundles on scratch:
+- `/n/scratch/users/n/nur479/sim_validation/vertical_slice_v1/simB0001/` — **current**, multi-gen cohort
+  (N=600 cohort = 300/gen × 2 gens, M=400, 2 chr, AM_r=0.4; FS≈0.51 PO≈0.51 deg2≈0.26 deg3≈0.13;
+  h2_dir≈0.52, h2_SNP_plim≈0.29, untyped_fraction≈0.43).
+- `/n/scratch/users/n/nur479/sim_validation/vertical_slice_v0/simB0001/` — single-generation (kept for
+  reference; no PO/deg2).
+Next: real-founder paradigm (A, UKB-governed) + population-structure/VT confounds + per-Population RNG.
