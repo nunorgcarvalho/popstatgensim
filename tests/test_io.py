@@ -326,6 +326,87 @@ def test_export_pgen_fileset_validates_shapes(tmp_path):
         psg.io.export_pgen_fileset(tmp_path / 'x', np.zeros((3, 2)), iids=['a', 'b'])
 
 
+def test_map_rel_class_maps_degrees_and_first_degree_types():
+    assert psg.io.map_rel_class('sibling', 1) == 'FS'
+    assert psg.io.map_rel_class('parent', 1) == 'PO'
+    assert psg.io.map_rel_class('offspring', 1) == 'PO'
+    assert psg.io.map_rel_class('uncle/aunt', 2) == 'deg2'
+    assert psg.io.map_rel_class('1cousin', 3) == 'deg3'
+    assert psg.io.map_rel_class('2cousin', 5) == 'fine_deg'
+    assert psg.io.map_rel_class('2cousin', 11) == 'fine_deg'
+    # self / unrelated / too-distant -> omitted
+    assert psg.io.map_rel_class('self', 0) is None
+    assert psg.io.map_rel_class('unspecified', 12) is None
+
+
+def test_export_ibd_pairs_canonicalizes_and_filters(tmp_path):
+    # IIDs deliberately chosen so lexicographic order differs from index order:
+    # 'p_10' < 'p_2' as strings, matching h2est canon().
+    iids = ['p_2', 'p_10', 'p_3']
+    relatedness = np.array(
+        [
+            [1.0, 0.5, 0.02],
+            [0.5, 1.0, 0.26],
+            [0.02, 0.26, 1.0],
+        ]
+    )
+    pair_class_degree = {
+        (0, 1): ('FS', 1),     # p_2 & p_10 full sibs
+        (1, 2): ('deg2', 2),   # p_10 & p_3
+        (0, 2): (None, 20),    # unrelated -> skipped
+    }
+    out = psg.io.export_ibd_pairs(tmp_path / 'ibd_pairs.tsv', relatedness, iids, pair_class_degree)
+    lines = out.read_text().strip().splitlines()
+    assert lines[0] == 'ID1\tID2\trelatedness\trel_class\tdegree'
+    # two retained pairs; canonical string order p_10 <= p_2, p_10 <= p_3
+    body = [ln.split('\t') for ln in lines[1:]]
+    assert len(body) == 2
+    assert [r[:2] for r in body] == [['p_10', 'p_2'], ['p_10', 'p_3']]
+    assert body[0][3] == 'FS' and body[0][4] == '1'
+    assert float(body[0][2]) == 0.5
+
+
+def test_export_pheno_writes_fid_iid_y_with_header(tmp_path):
+    out = psg.io.export_pheno(tmp_path / 'pheno.tsv', [1.5, np.nan], ['s_1', 's_2'],
+                              fids=['fam', 'fam'])
+    lines = out.read_text().strip().splitlines()
+    assert lines[0] == 'FID\tIID\ty'
+    assert lines[1].split('\t') == ['fam', 's_1', '1.5']
+    assert lines[2].split('\t') == ['fam', 's_2', 'NA']
+
+
+def test_export_variants_base_and_effects(tmp_path):
+    ids = ['chr1:1', 'chr1:2', 'chr2:1']
+    base = psg.io.export_variants_base(
+        tmp_path / 'variants.base.tsv',
+        ids, chrom=[1, 1, 2], pos=[1, 2, 1], cm=[0.0, 0.01, 0.0],
+        maf=[0.2, 0.4, 0.1], typed=[True, False, True],
+    )
+    blines = base.read_text().strip().splitlines()
+    assert blines[0] == 'id\tchrom\tpos\tcm\tmaf\ttyped'
+    assert blines[1].split('\t') == ['chr1:1', '1', '1', '0', '0.2', '1']
+    assert blines[2].split('\t')[-1] == '0'  # typed=False
+
+    eff = psg.io.export_variants_effects(
+        tmp_path / 'variants.effects.tsv',
+        ids, causal=[True, False, True], beta_std=[0.3, 0.0, -0.2],
+    )
+    elines = eff.read_text().strip().splitlines()
+    assert elines[0] == 'id\tcausal\tbeta_std'  # no beta_par_std column
+    assert elines[1].split('\t') == ['chr1:1', '1', '0.3']
+
+
+def test_export_json_serializes_numpy(tmp_path):
+    import json
+    manifest = {'h2': {'h2_dir': np.float64(0.42)}, 'M_causal': np.int64(100),
+                'components': np.array([0.1, 0.2])}
+    out = psg.io.export_json(tmp_path / 'truth_manifest.json', manifest)
+    loaded = json.loads(out.read_text())
+    assert loaded['h2']['h2_dir'] == 0.42
+    assert loaded['M_causal'] == 100
+    assert loaded['components'] == [0.1, 0.2]
+
+
 def test_prepare_reml_inputs_preserves_matching_order_when_ids_match():
     y = np.array([10.0, 20.0, 30.0])
     ids = np.array(['iid1', 'iid2', 'iid3'])

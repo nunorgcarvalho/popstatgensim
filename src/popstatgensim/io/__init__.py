@@ -8,6 +8,14 @@ from .gcta import (
     read_table_GCTA,
 )
 from .plink import export_pgen_by_chrom, export_pgen_fileset
+from .sim_export import (
+    export_ibd_pairs,
+    export_json,
+    export_pheno,
+    export_variants_base,
+    export_variants_effects,
+    map_rel_class,
+)
 
 __all__ = [
     "export_GRM_GCTA",
@@ -19,4 +27,10 @@ __all__ = [
     "prepare_reml_inputs",
     "export_pgen_fileset",
     "export_pgen_by_chrom",
+    "export_ibd_pairs",
+    "export_pheno",
+    "export_variants_base",
+    "export_variants_effects",
+    "export_json",
+    "map_rel_class",
 ]
