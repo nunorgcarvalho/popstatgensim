@@ -59,8 +59,8 @@ def generate_chromosomes(M: int ,chrs: int = 1, meioses_per_chr: int = 1):
         stop = M - M_left + M_c
         # sets recombination rates for chromosome
         R[start : stop] = meioses_per_chr / M_c
-        if c > 1:
-            R[start] = 0.5 # independence between chromosomes
+        if c > 0:
+            R[start] = 0.5 # independence between chromosomes (break at the start of every chromosome after the first)
             
         M_left -= M_c
 

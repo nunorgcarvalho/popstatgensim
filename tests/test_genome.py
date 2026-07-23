@@ -93,3 +93,22 @@ def test_genome_structure_helpers_produce_expected_shapes():
     assert set(np.unique(haplotypes)).issubset({0, 1})
     assert chromosomes.shape == (6,)
     assert blocks.shape == (6,)
+
+
+def test_generate_chromosomes_breaks_every_boundary_after_first():
+    # An R == 0.5 recombination rate marks independence between chromosomes. The break
+    # must appear at the start of EVERY chromosome except the first (previously the
+    # chr1<->chr2 boundary was missed because the break was only set from the 3rd chr on).
+    two = genome.generate_chromosomes(6, chrs=2, meioses_per_chr=1)
+    # chr split is [0,1,2] | [3,4,5]; the only break is at index 3 (start of chr 2)
+    assert two[3] == 0.5
+    assert np.flatnonzero(two == 0.5).tolist() == [3]
+
+    three = genome.generate_chromosomes(9, chrs=3, meioses_per_chr=1)
+    # chr split is [0..2] | [3..5] | [6..8]; breaks at the start of chr 2 and chr 3
+    assert np.flatnonzero(three == 0.5).tolist() == [3, 6]
+    assert three[0] != 0.5  # no break before the first chromosome
+
+    # a single chromosome has no inter-chromosome break at all
+    one = genome.generate_chromosomes(6, chrs=1, meioses_per_chr=1)
+    assert not np.any(one == 0.5)
