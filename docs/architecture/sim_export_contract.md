@@ -1,160 +1,155 @@
 # Simulation → h2est export contract
 
-**Status: v0.2 — converged with the h2est + simmgr workers over inter-agent comms
-(2026-07-23).** Nearly everything is LOCKED; one small ownership item remains (Var_typed, §6).
-Owner: popstatgensim worker (simulator + exporters). Consumers: h2est pipeline (analyzer +
-`simulations/` bridge) + simmgr (two-stage generation orchestrator).
+**Status: v0.3 — FULLY CONVERGED (h2est + simmgr, 2026-07-23). No open items.**
+A working vertical-slice bundle exists on disk (see §9). Owner: popstatgensim worker. Consumers:
+h2est pipeline (analyzer + `simulations/` bridge) + simmgr (two-stage generation orchestrator).
 
-This document defines the on-disk bundle that `popstatgensim` writes for **one simulated
-population** so that the **real h2est pipeline** can estimate heritability/confounding on it and
-score each estimator against known truth (simulation-based validation of the RelReg estimators;
-thesisMgr task-20260722-175800 / -175802 / -175801).
+Defines the on-disk bundle `popstatgensim` writes per simulated population so the **real** h2est
+pipeline can estimate on it and score each estimator against known truth (RelReg simulation
+validation; thesisMgr task-20260722-175800 / -175802 / -175801).
 
-`[LOCKED]` = agreed by all parties. `[OPEN]` = still to settle.
+`[LOCKED]` = agreed by all parties.
 
 ---
 
-## 0. Settled ground rules (from the parent task; not re-litigated)
-- popstatgensim generates DATA only; the **real** h2est pipeline estimates. No estimators are
-  reimplemented in popstatgensim.
-- **Ground-truth IBD is fed to the methods** (not hap-IBD/IBDkin). Inferred IBD is deferred.
-- h2est **reuses its existing IBD-table build (task-034030)**: popstatgensim emits ONE per-pair
-  truth table (§4); h2est's build derives every LOCKED relationship matrix (R_IBD, R_IBD_4to11,
-  d_IBD_leq3, d_IBD_FS, C_FS, C_PO, C_eq2, C_eq3, R_IBD_leq3, …) from it via a "truth-mode"
-  adapter (h2est task-175802 design-choice #3). popstatgensim does NOT emit matrices or segments.
-- **Subset trick** for SNP-h² vs direct-h²: ALL causal-eligible variants are simulated + exported;
-  the SNP GRM (`R_oo`) is built by h2est on the **typed subset** (a `typed` flag, never realized
-  by dropping variants — IBD needs all of them). The typed subset is a **population-level**
-  property (the "array"), shared across trait runs.
-- Two DGP paradigms feed the SAME bundle format: (A) real-founder forward-sim [UKB-governed],
-  (B) stylized from-scratch [vertical slice]. Only the front-end differs.
+## 0. Settled ground rules
+- popstatgensim generates DATA only; the real h2est pipeline estimates. No estimators reimplemented.
+- **Ground-truth IBD fed to methods** (not hap-IBD/IBDkin); inferred IBD deferred.
+- h2est **reuses its IBD build (task-034030)**: popstatgensim emits ONE per-pair truth table (§4);
+  h2est's "truth-mode" adapter derives every LOCKED matrix (R_IBD, R_IBD_4to11, d_IBD_leq3,
+  d_IBD_FS, C_FS, C_PO, C_eq2, C_eq3, R_IBD_leq3, …) from it. popstatgensim emits no matrices/segments.
+- **Subset trick**: ALL causal-eligible variants simulated + exported; h2est builds the SNP GRM
+  (`R_oo`) on the `typed` subset; ground-truth IBD (all variants) gives total direct-h². Typed subset
+  is a **population-level** flag, never an omission.
+- Two DGP paradigms feed the SAME format: (A) real-founder [UKB-governed]; (B) stylized [the slice].
 
 ---
 
-## 1. Bundle layout — two-level (population vs trait)  **[LOCKED]**
-Split so an analysis-only trait can reuse a population without regenerating genotypes. simmgr
-mints identities: a content-hash `population_id` (drives dedup/reuse) with a short stable alias
-`pop_id` (e.g. `simB0001`) that goes into IIDs.
+## 1. Bundle layout — two-level  **[LOCKED]**
+Filenames match simmgr's generation manifest so its index resolves directly. simmgr mints a
+content-hash `population_id` (dir name + dedup) and a short stable `pop_alias` (e.g. `simBe269f8`)
+used in IIDs.
 
 ```
-<population_id>/                         # POPULATION-level, built once, reused
+<population_id>/                         # POPULATION-level, built once, reused across trait runs
   genotypes/
-    chr1.pgen  chr1.pvar  chr1.psam
-    chr2.pgen  chr2.pvar  chr2.psam      # one plink2 pfile-set per chromosome (all variants)
-  variants.base.tsv                      # id, chrom, pos, cm, maf, typed   (§2)
-  ibd_pairs.tsv                          # ground-truth per-pair relatedness (§4) — population-level
+    chr1.pgen chr1.pvar chr1.psam
+    chr2.pgen chr2.pvar chr2.psam        # one plink2 pfile-set per chromosome (ALL variants)
+  variants.tsv                           # id, chrom, pos, cm, maf, typed              (§2)
+  ibd_pairs.tsv                          # ground-truth per-pair relatedness           (§4)
   population.pkl                         # full Population incl. past gens, version-stamped (§7)
-  meta.json                              # pop_id, population_id, paradigm(A/B), seed, N, M,
-                                         # generation_analyzed, popstatgensim commit hash, params
+  population.meta.json                   # pop_alias, population_id, paradigm, seed, N, M,
+                                         # generation_analyzed, M_typed, M_causal, commit, AM params
+  truth.json                             # population-level realized truth: spouse corr, per-class
+                                         # relatedness summary
+  SIM_<population_id>.txt                # sample list (one IID/line) — simmgr owns; slice also emits
   traits/
-    <trait_run_id>/                      # TRAIT-level, one per trait run
-      pheno.tsv                          # analyzed-cohort phenotype (§3)
-      truth_manifest.json                # ground-truth for scoring (§6)
-      variants.effects.tsv               # id, causal, beta_std, beta_par_std (§2)
+    <trait_run_id>/
+      phenotype.tsv                      # FID IID y (header, NA missing)              (§3)
+      genetic_values.tsv                 # per-individual y_ decomposition (diagnostic)
+      truth.json                         # trait truth: VCs, h2 defs, var_A_typed, causal, am (§6)
 ```
-- **Analyzed cohort** = the individuals h2est estimates on. Default = most recent generation;
-  `meta.json.generation_analyzed` records the index. genotypes / pheno / ibd / variants all cover
-  exactly this cohort (same N, same IID set + order). The pickle may carry ancestors too.
-- For the **AM vertical slice**, the structuring (AM) trait is the first `trait_run` under its
-  population (pop×trait coincide), realized during forward-sim and saved in the pickle.
+Analyzed cohort = individuals h2est estimates on. Default = the **single most-recent generation**
+(see §8 cohort note). genotypes/pheno/ibd/variants all cover exactly that cohort (same N, IID set,
+order). The pickle may carry ancestors.
 
 ---
 
-## 2. Genotypes + per-variant truth  **[LOCKED]**
-- Chr-split plink2 pfiles written in-process with `pgenlib.PgenWriter` (biallelic hardcalls from
-  `pop.G`, ALT-dosage 0..2). **Built + tested + committed** (`io.plink.export_pgen_by_chrom`,
-  branch `sim-validation`, commit 73e9b68). All causal-eligible variants written; typed subset is
-  a flag, not an omission. Chromosomes from `R == 0.5` breaks (`Population.get_chrom_idx`); the
-  `structure.py` chr-break bug (missed chr1↔chr2) is fixed (commit b4d905d).
-- `.psam`: `#FID IID SEX`, FID=`<pop_id>`, IID=`<pop_id>_<i>` (SEX 1=male/2=female).
-- `.pvar`: `#CHROM POS ID REF ALT`. REF=allele 0, ALT=allele 1, so `pop.G` is the ALT dosage.
-- **`variants.base.tsv`** (population-level, tab-sep, header): `id chrom pos cm maf typed`.
-  `id` matches `.pvar` ID; `cm = 100 × cumulative per-variant recomb` for B (real map for A) —
-  kept for completeness, NOT on the critical path (h2est truth-IBD uses no cM map).
-- **`variants.effects.tsv`** (trait-level, tab-sep, header): `id causal beta_std beta_par_std`.
-  `beta_std` = true per-standardized-allele direct effect (`GeneticEffect.effects_standardized`),
-  0 if non-causal; `beta_par_std` for the parental/IGE effect if simulated.
+## 2. Genotypes + per-variant table  **[LOCKED]**
+- Chr-split plink2 pfiles via in-process `pgenlib.PgenWriter` (`io.plink.export_pgen_by_chrom`);
+  biallelic ALT-dosage from `pop.G`; REF=allele 0, ALT=allele 1. Chromosomes from `R==0.5` breaks
+  (`Population.get_chrom_idx`); the `structure.py` chr-break bug is fixed.
+- `.psam`: `#FID IID SEX` (SEX 1=male/2=female). `.pvar`: `#CHROM POS ID REF ALT`.
+- **`variants.tsv`** (population-level; `io.export_variants_base`): `id chrom pos cm maf typed`.
+  `cm = 100 × cumulative per-variant recomb` for B (real map for A) — completeness only; the
+  truth-IBD build uses no cM map. h2est builds `R_oo` on `typed==1`, ONCE per population.
+- Per-trait causal effects are NOT in `variants.tsv` (they are per-trait) — they live in the trait
+  `truth.json` (§6).
 
 ---
 
 ## 3. Phenotype  **[LOCKED]**
-`pheno.tsv`, tab-sep, WITH header, missing token `NA`:
-```
-FID   IID   y
-```
-`y` = `Trait.y` of the analyzed generation. In the AM slice the same trait is the AM-sorting trait
-(population stage) AND the analyzed phenotype. h2est's SIM_pheno source reader: fid_column=FID,
-iid_column=IID.
+`phenotype.tsv`, tab-sep, header, missing token `NA`: `FID   IID   y`. `y` = `Trait.y` of the
+analyzed generation. In the AM slice the same trait drives AM (population stage) and is analyzed.
+h2est SIM_pheno reader: fid_column=FID, iid_column=IID.
 
 ---
 
-## 4. Ground-truth IBD — ONE scalar per-pair table  **[LOCKED]**
-`ibd_pairs.tsv` (population-level, tab-sep, header). h2est derives all matrices from this.
+## 4. Ground-truth IBD — one scalar per-pair table  **[LOCKED]**
+`ibd_pairs.tsv` (population-level; `io.export_ibd_pairs`), tab-sep, header:
 ```
 ID1   ID2   relatedness   rel_class   degree
 ```
 - `relatedness` = realized π = 2 × kinship = `pedigree.ibd.compute_K_IBD` (exact truth).
-- `ID1 <= ID2` by **Python string `<=`** (plain lexicographic on the namespaced IID strings) — must
-  match h2est's `canon()`.
-- `rel_class` from `Pedigree.path_to_relationship`: full_sibling→`FS`, parent_offspring→`PO`,
-  2nd-degree→`deg2`, 3rd→`deg3`, degrees 4–11→`fine_deg` (integer in `degree`).
-- `degree` = integer 1..11.
-- **Related pairs only** (degree ≤ 11); all other pairs absent → default 0 (h2est convention).
-  No N×N, no hap-IBD segments, no cM map (segments only matter for deferred inferred-IBD).
+- `ID1 <= ID2` by Python string `<=` (matches h2est `canon()`).
+- `rel_class` from `Pedigree.path_to_relationship` via `io.map_rel_class`: full_sibling→`FS`,
+  parent_offspring→`PO`, 2nd→`deg2`, 3rd→`deg3`, degrees 4–11→`fine_deg`. `degree` = int 1..11.
+- **Thresholding (scaling)**: the writer takes `min_relatedness`; the slice uses `0.0`, emitting only
+  pairs with realized π > 0 (plus the close classes FS/PO/deg2/deg3 always, for the confound
+  matrices). The zero-π distant tail is omitted — equivalent to absent → 0 on h2est's side — so the
+  table does not scale as N². (Slice: ~54k rows for N=1000 vs ~500k unthresholded.)
+- No N×N, no segments, no cM map.
 
 ---
 
 ## 5. Sample-ID namespacing  **[LOCKED]**
-- `pop_id` = short stable alias minted by simmgr (↔ content-hash `population_id` in its registry).
-- **IID = `<pop_id>_<i>`** (i in 1..N, globally unique); **FID = `<pop_id>`**.
-- Identical IID strings + order across `.psam`, `pheno.tsv`, `ibd_pairs.tsv`, and the manifest.
-- h2est keys on IID; sample-fingerprint = sha1 of sorted unique IIDs → uniqueness + consistency is
-  all that matters. Canonical pair order in `ibd_pairs.tsv` = string `<=` (§4).
+- simmgr mints `pop_alias` (short, e.g. `simBe269f8`) ↔ content-hash `population_id`, and passes the
+  alias to the exporter's `pop_id`/`pop_alias` param.
+- **IID = `<pop_alias>_<i>`** (i=1..N, globally unique); **FID = `<pop_alias>`**.
+- Identical IID strings + order across `.psam`, `phenotype.tsv`, `ibd_pairs.tsv`, `SIM_*.txt`, truth
+  JSONs. h2est keys on IID; sample-fingerprint = sha1 of sorted unique IIDs.
 
 ---
 
-## 6. Truth-manifest — for scoring  **[LOCKED fields; one OPEN ownership item]**
-`truth_manifest.json` (trait-level). popstatgensim reports:
-- `variance_components`: realized VCs per component (`Trait.var`): `A` (direct), `A_par`/`VT`,
-  `popstrat`, `Eps`, plus total phenotypic variance `Vp`.
+## 6. Truth JSONs  **[LOCKED]**
+Population-level `truth.json`: realized spouse correlation, per-class pair counts + mean relatedness.
+
+Trait-level `truth.json` (`io.export_json`):
+- `variance_components`: realized VCs per component (`Trait.var`): `A`, `A_par`/`VT`, `popstrat`, `Eps`.
+- `Vp`: total phenotypic variance.
 - `h2`:
-  - `h2_dir` = `Var_allcausal / Vp`, with **`Var_allcausal` reported exactly as `Trait.var['A']`**.
-  - `h2_SNP` = additive var tagged by the typed subset / Vp — see OPEN item below.
-  - `untyped_fraction` = `1 − Var_typed / Var_allcausal`.
-- `am`: `AM_r` target + realized spouse correlation (`Population.get_spouse_corr`) + AM trait name +
-  n generations to equilibrium. (h2est owns the AM-inflation correction of the h2_dir estimand; it
-  needs these truthful numbers to predict the expected inflation.)
-- `provenance`: popstatgensim commit, paradigm (A/B), seed, N, M, M_causal, M_typed.
-- `pedigree_edges`: IID → (parent_IID_1, parent_IID_2); founders have missing parents. (Recommended;
-  not strictly blocking slice 1 since per-pair rel_class already drives the matrices.)
-- `y_decomposition` (per-individual `Trait.y_` by IID): optional diagnostic (plim-vs-finite-N).
+  - `h2_dir` = `var_A_allcausal / Vp`, `var_A_allcausal` = `Trait.var['A']` (exact).
+  - `h2_SNP_plim` = `var_A_typed / Vp`, where **`var_A_typed` = Var(OLS projection of the true genetic
+    value `y_['A']` onto the standardized typed genotypes)** (`utils.projection_variance`). This IS
+    the plim of GREML-on-typed / relreg1's R_oo channel (h2est owns this definition). ⚠ In-sample
+    projection: pick **N ≫ M_typed** or it inflates toward 1.
+  - `untyped_fraction` = `1 − var_A_typed / var_A_allcausal`.
+  - popstatgensim ALSO exports the raw substrate (all-causal `beta_std`, `typed`/`causal` flags,
+    genotypes) so h2est can recompute `var_A_typed` and absorb estimand refinements (e.g. AM-corrected).
+- `am`: `AM_r` target + realized spouse corr (`pop.past[1].get_spouse_corr`) + AM trait name + n gens.
+  (h2est owns the AM-inflation correction of h2_dir; these numbers let it predict the inflation.)
+- `causal`: causal variant ids + `beta_std` (+ `beta_par_std` if simulated).
+- `provenance`: commit, paradigm, seed, N, M, M_causal, M_typed, generation_analyzed.
 
-**Per-estimator estimand targets (from h2est methods doc 09 §2.4; for reference — h2est forms the
-ratios):** GREML→h2_SNP; relreg1→h2_SNP+h2_dir+h2_scale (joint); relreg2/relreg4→h2_dir; relreg5→
-h2_dir+h2_scale; sibreg→h2_dir; relreg3→future. `h2_scale − h2_dir ≈ confound magnitude` (VT +
-popstrat + AM), which the sim SETS — so reporting VT var, popstrat var, AM_r + spouse corr lets
-h2est predict the expected h2_scale bias.
-
-**[OPEN — Var_typed ownership]** Under LD, "additive variance tagged by the typed subset" is
-estimand-model dependent (typed non-causal tag untyped causal). Since h2est owns the GREML estimand
-definition, default: **popstatgensim exports the pieces (all-causal `beta_std`, per-variant
-`typed`/`causal` flags, genotypes) and h2est computes `Var_typed`.** popstatgensim can additionally
-ship a diagnostic `Var_typed = R²(A ~ X_typed)·Vp` (projection of the true genetic value onto the
-typed standardized genotypes). Awaiting h2est's pick.
+**Per-estimator estimand targets (h2est forms the ratios):** GREML→h2_SNP; relreg1→h2_SNP+h2_dir+
+h2_scale; relreg2/4→h2_dir; relreg5→h2_dir+h2_scale; sibreg→h2_dir. `h2_scale − h2_dir ≈ confound
+magnitude` (VT+popstrat+AM), which the sim sets.
 
 ---
 
 ## 7. Persistence & governance  **[LOCKED]**
-- `population.pkl`: full `Population` incl. `pop.past` generations, version-stamped with the
-  popstatgensim commit. simmgr verified plain `pickle` round-trips past gens + pedigree + traits
-  (the global RNG does not travel; simmgr reseeds in stage 2). `keep_past_generations` = deepest
-  ancestral effect: **VT → 1** (the slice); explicit higher-order IGE → k (not yet implemented).
-- **Governance:** paradigm-**A** (real-founder) bundles live under **scratch**, under UKB data
-  rules, **never logged** (no individual-level data anywhere). Paradigm-B bundles are synthetic.
+- `population.pkl`: full `Population` incl. `pop.past`, version-stamped. simmgr verified plain pickle
+  round-trips past gens + pedigree + traits (global RNG doesn't travel; simmgr reseeds stage 2).
+  `keep_past_generations` = deepest ancestral effect: **VT → 1** (the slice); higher-order IGE → k
+  (not yet implemented).
+- **Governance**: paradigm-A (real-founder) bundles live under scratch, under UKB rules, never logged.
+  Paradigm-B is synthetic.
 
 ---
 
-## 8. Remaining open item
-Only §6 **Var_typed ownership** (h2est to pick: h2est computes it, or popstatgensim also ships the
-projection diagnostic). Everything else is LOCKED. popstatgensim is building the remaining exporters
-(ibd_pairs, pheno, variants.*, manifest, meta, pickle) + the first stylized+AM bundle against v0.2.
+## 8. Analyzed-cohort scope (slice vs next increment)
+The default single-most-recent-generation cohort (monogamous-pair forward-sim) contains **FS (deg1),
+deg3 (1st cousins), and fine_deg (deg 4–11)** — verified: FS realized π ≈ 0.50, deg3 ≈ 0.125. It does
+**NOT** contain **PO or deg2** (parent-offspring / avuncular / grandparent / half-sib) — those are
+cross-generational. So slice v0 exercises GREML, sibreg, and the relreg parts not needing C_PO/C_eq2;
+PO/deg2 require a **multi-generation cohort** (pool final gen + parents [+ grandparents]) plus new
+cross-generation pedigree classification — the **next increment**, not a rebuild (exporters are
+cohort-agnostic).
+
+## 9. Status
+Vertical slice (stylized B + AM) implemented and PASSING end-to-end on branch `sim-validation`:
+`examples/sim_validation_vertical_slice.py` → chr-split pgen (plink2-validated), ibd_pairs (FS≈0.50),
+phenotype, variants, truth JSONs, pickle. A durable handoff bundle:
+`/n/scratch/users/n/nur479/sim_validation/vertical_slice_v0/simB0001/`
+(N=1000, M=800, 2 chr, 6 gens AM_r=0.4; h2_dir≈0.52, h2_SNP_plim≈0.29, untyped_fraction≈0.45).
+Next: multi-generation cohort (PO/deg2) + real-founder paradigm (A) + population-structure/VT confounds.
