@@ -41,11 +41,13 @@ def _commit_hash(repo: Path) -> str:
 
 
 def build_population(*, N, M, chrs, meioses_per_chr, m_causal, var_A, var_Eps,
-                     n_gen, am_r, seed):
+                     n_gen, am_r, seed, cohort_generations):
     """Stylized (paradigm B) population + AM-sorting additive trait, simulated to (near-)equilibrium."""
     R = genome.generate_chromosomes(M, chrs=chrs, meioses_per_chr=meioses_per_chr)
+    # retain enough past generations to flatten the analyzed cohort (>=1 also covers VT depth-1)
     params = PopulationParams(track_pedigree=True, track_haplotypes=True,
-                              keep_past_generations=1, n_offspring_dist='constant')
+                              keep_past_generations=max(1, cohort_generations),
+                              n_offspring_dist='constant')
     pop = Population(N=N, M=M, P=2, params=params, seed=seed)
     pop.params.R = R                     # 2-chromosome recombination map (LD within, break between)
     pop.set_founding_haplotypes()        # unique founder haplotype IDs -> enables true-IBD tracking
@@ -54,20 +56,38 @@ def build_population(*, N, M, chrs, meioses_per_chr, m_causal, var_A, var_Eps,
     pop.add_trait('y', effects={'A': effect_A}, var_Eps=var_Eps)
     # AM sorts on the phenotype 'y' every generation (population stage); 'y' is also the analyzed trait
     pop.simulate_generations(n_gen, AM_r=am_r, AM_trait='y', AM_type='phenotypic', verbose=False)
-    pop.ped.construct_paths()
-    pop.ped.assign_relationships()
     return pop
 
 
-def assemble_and_write(pop, out_root: Path, *, pop_alias, m_typed, seed, am_r, n_gen, commit):
-    """Write the full two-level bundle and return a summary dict for validation."""
+def build_cohort(pop, cohort_generations):
+    """The analyzed cohort = the current generation flattened with `cohort_generations` past ones.
+
+    ``flatten_generations`` pools the genotypes/haplotypes (preserving cross-generation founder
+    haplotype IDs so true-IBD works across generations) AND rebuilds the cross-generation pedigree,
+    so parent-offspring (PO) and avuncular (deg2) pairs appear alongside FS / cousins.
+    """
+    cohort = pop.flatten_generations(cohort_generations)
+    cohort.ped.assign_relationships()
+    return cohort
+
+
+def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, seed, am_r,
+                       n_gen, cohort_generations, commit):
+    """Write the full two-level bundle and return a summary dict for validation.
+
+    ``cohort`` is the analyzed (flattened multi-generation) population whose genotypes / phenotype /
+    IBD / variants are exported; ``base_pop`` is the underlying generative Population that is pickled
+    as the reusable artifact (the cohort is ``base_pop.flatten_generations(cohort_generations)``).
+    """
+    pop = cohort
     N, M, P = pop.N, pop.M, pop.P
     trait = pop.traits['y']
 
     # ----- per-variant population-level truth -----
     chrom_starts = pop.get_chrom_idx()
     chrom = np.searchsorted(chrom_starts, np.arange(M), side='right').astype(int)  # 1-based labels
-    pos = np.asarray(pop.BPs, dtype=int) + 1
+    bps = getattr(pop, 'BPs', None)
+    pos = (np.asarray(bps, dtype=int) if bps is not None else np.arange(M)) + 1
     p = np.asarray(pop.p, dtype=float)
     maf = np.minimum(p, 1.0 - p)
     R = np.asarray(pop.params.R, dtype=float)
@@ -100,7 +120,7 @@ def assemble_and_write(pop, out_root: Path, *, pop_alias, m_typed, seed, am_r, n
     X_typed = standardize_G(pop.G[:, typed].astype(float), p[typed], P)
     var_A_typed = projection_variance(trait.y_['A'], X_typed)
     try:
-        spouse_corr = float(pop.past[1].get_spouse_corr('y'))
+        spouse_corr = float(base_pop.past[1].get_spouse_corr('y'))
     except Exception:
         spouse_corr = float('nan')
     j_causal = np.asarray(trait.effects['A'].j_causal, dtype=int)
@@ -121,8 +141,10 @@ def assemble_and_write(pop, out_root: Path, *, pop_alias, m_typed, seed, am_r, n
     # threshold out the large tail of zero-IBD distant pairs (== absent → 0 on the consumer
     # side); close classes are retained regardless for the confound matrices
     io.export_ibd_pairs(pop_dir / 'ibd_pairs.tsv', K, iids, pcd, min_relatedness=0.0)
+    # pickle the underlying generative population (the reusable artifact); the analyzed cohort is
+    # base_pop.flatten_generations(cohort_generations)
     with (pop_dir / 'population.pkl').open('wb') as fh:
-        pickle.dump(pop, fh)
+        pickle.dump(base_pop, fh)
     (pop_dir / f'SIM_{pop_alias}.txt').write_text('\n'.join(iids) + '\n', encoding='utf-8')
 
     class_counts = Counter(v[0] for v in pcd.values())
@@ -131,10 +153,21 @@ def assemble_and_write(pop, out_root: Path, *, pop_alias, m_typed, seed, am_r, n
         pairs = [(i, j) for (i, j), (c, d) in pcd.items() if c == cls]
         mean_rel_by_class[cls] = float(np.mean([K[i, j] for i, j in pairs])) if pairs else None
 
+    # pedigree edges: IID -> (parent IIDs) for cohort members whose parents are in the cohort
+    parents_rel = np.asarray(pop.relations['parents'])
+    pedigree_edges = {}
+    for i in range(N):
+        par = [int(parents_rel[i, k]) for k in range(parents_rel.shape[1])]
+        par_iids = [iids[pj] if (0 <= pj < N) else None for pj in par]
+        if any(pi is not None for pi in par_iids):
+            pedigree_edges[iids[i]] = par_iids
+
     io.export_json(pop_dir / 'population.meta.json', {
         'pop_alias': pop_alias, 'paradigm': 'B', 'seed': int(seed),
-        'N': int(N), 'M': int(M), 'n_chromosomes': int(len(chrom_starts)),
-        'generation_analyzed': int(pop.t), 'keep_past_generations': 1,
+        'N_cohort': int(N), 'N_per_generation': int(base_pop.N), 'M': int(M),
+        'n_chromosomes': int(len(chrom_starts)),
+        'cohort_generations': int(cohort_generations),
+        'base_generation': int(base_pop.t), 'keep_past_generations': int(base_pop.keep_past_generations),
         'AM_r_target': float(am_r), 'AM_trait': 'y', 'n_generations': int(n_gen),
         'M_typed': int(typed.sum()), 'M_causal': int(len(j_causal)),
         'popstatgensim_commit': commit,
@@ -143,6 +176,7 @@ def assemble_and_write(pop, out_root: Path, *, pop_alias, m_typed, seed, am_r, n
         'realized_spouse_corr': spouse_corr,
         'relationship_class_counts': {k: int(v) for k, v in class_counts.items()},
         'mean_relatedness_by_class': mean_rel_by_class,
+        'pedigree_edges': pedigree_edges,
     })
 
     # trait-level
@@ -212,34 +246,40 @@ def validate_bundle(summary, plink2='plink2'):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', required=True, help='bundle root directory')
-    ap.add_argument('--N', type=int, default=1000)
-    ap.add_argument('--M', type=int, default=800)
+    ap.add_argument('--N', type=int, default=300)   # per generation; cohort ~ N*(cohort_generations+1)
+    ap.add_argument('--M', type=int, default=400)
     ap.add_argument('--chrs', type=int, default=2)
     ap.add_argument('--meioses-per-chr', type=int, default=2)
-    ap.add_argument('--m-causal', type=int, default=200)
-    ap.add_argument('--m-typed', type=int, default=250)
+    ap.add_argument('--m-causal', type=int, default=120)
+    ap.add_argument('--m-typed', type=int, default=120)
     ap.add_argument('--var-A', type=float, default=0.5)
     ap.add_argument('--var-Eps', type=float, default=0.5)
     ap.add_argument('--n-gen', type=int, default=6)
     ap.add_argument('--am-r', type=float, default=0.4)
     ap.add_argument('--seed', type=int, default=12345)
     ap.add_argument('--pop-alias', default='simB0001')
+    ap.add_argument('--cohort-generations', type=int, default=1,
+                    help='past generations flattened into the analyzed cohort (1 = current + parents, '
+                         'giving FS/PO/deg2/deg3)')
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
     commit = _commit_hash(repo)
     np.random.seed(args.seed)
 
-    print(f'Building stylized+AM population (N={args.N}, M={args.M}, {args.chrs} chr, '
+    print(f'Building stylized+AM population (N={args.N}/gen, M={args.M}, {args.chrs} chr, '
           f'{args.n_gen} gens, AM_r={args.am_r})...')
     pop = build_population(N=args.N, M=args.M, chrs=args.chrs,
                            meioses_per_chr=args.meioses_per_chr, m_causal=args.m_causal,
                            var_A=args.var_A, var_Eps=args.var_Eps, n_gen=args.n_gen,
-                           am_r=args.am_r, seed=args.seed)
-    summary = assemble_and_write(pop, Path(args.out), pop_alias=args.pop_alias,
+                           am_r=args.am_r, seed=args.seed, cohort_generations=args.cohort_generations)
+    print(f'Flattening cohort: current + {args.cohort_generations} past generation(s)...')
+    cohort = build_cohort(pop, args.cohort_generations)
+    summary = assemble_and_write(cohort, Path(args.out), base_pop=pop, pop_alias=args.pop_alias,
                                  m_typed=args.m_typed, seed=args.seed, am_r=args.am_r,
-                                 n_gen=args.n_gen, commit=commit)
-    print(f'\nBundle written to {summary["pop_dir"]}')
+                                 n_gen=args.n_gen, cohort_generations=args.cohort_generations,
+                                 commit=commit)
+    print(f'\nBundle written to {summary["pop_dir"]}  (cohort N={cohort.N})')
     print(f'  chromosomes: {summary["n_chrom"]}   M_causal={summary["M_causal"]}  M_typed={summary["M_typed"]}')
     print(f'  relationship classes: {summary["class_counts"]}')
     print(f'  Vp={summary["Vp"]:.3f}  h2_dir={summary["var_A_all"]/summary["Vp"]:.3f}  '
