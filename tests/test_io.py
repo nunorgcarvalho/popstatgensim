@@ -366,6 +366,25 @@ def test_export_ibd_pairs_canonicalizes_and_filters(tmp_path):
     assert float(body[0][2]) == 0.5
 
 
+def test_export_ibd_pairs_min_relatedness_keeps_close_classes(tmp_path):
+    iids = ['s_1', 's_2', 's_3']
+    relatedness = np.array(
+        [
+            [1.0, 0.5, 0.0],   # s_1-s_2 FS (0.5); s_1-s_3 distant, zero IBD
+            [0.5, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    pcd = {
+        (0, 1): ('FS', 1),        # close class, kept even if it were zero
+        (0, 2): ('fine_deg', 9),  # distant, relatedness 0 -> dropped by threshold
+    }
+    out = psg.io.export_ibd_pairs(tmp_path / 'ibd.tsv', relatedness, iids, pcd, min_relatedness=0.0)
+    body = [ln.split('\t') for ln in out.read_text().strip().splitlines()[1:]]
+    assert len(body) == 1
+    assert body[0][3] == 'FS'
+
+
 def test_export_pheno_writes_fid_iid_y_with_header(tmp_path):
     out = psg.io.export_pheno(tmp_path / 'pheno.tsv', [1.5, np.nan], ['s_1', 's_2'],
                               fids=['fam', 'fam'])

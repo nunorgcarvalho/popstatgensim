@@ -109,6 +109,34 @@ def fit_linear_regression(
     )
 
 
+def projection_variance(y: np.ndarray, X: np.ndarray, add_intercept: bool = True) -> float:
+    '''
+    Variance of the OLS projection of `y` onto the columns of `X` — i.e. the variance of `y`
+    that is linearly capturable by `X`. Used for the ``var_A_typed`` truth (the plim of the
+    typed-SNP heritability estimand): pass the true genetic value as `y` and the standardized
+    typed genotypes as `X`.
+    Parameters:
+        y (1D array): response (e.g. the true additive genetic value A).
+        X (2D array): N x K predictor matrix (e.g. standardized typed genotypes).
+        add_intercept (bool): whether to fit an intercept (recommended). Default True.
+    Returns:
+        float: variance of the fitted values (Var of the projection). NOTE: this is the
+            in-sample projection; with K predictors it is inflated by ~K/N relative to the
+            large-sample plim, so pick N >> K for a faithful estimand.
+    '''
+    y = np.asarray(y, dtype=float)
+    X = np.asarray(X, dtype=float)
+    if X.ndim == 1:
+        X = X[:, None]
+    if y.ndim != 1 or X.ndim != 2 or X.shape[0] != y.shape[0]:
+        raise ValueError('`y` must be 1D and `X` an (N x K) matrix with matching N.')
+    n = y.shape[0]
+    design = np.column_stack((np.ones(n), X)) if add_intercept else X
+    coef = np.linalg.pinv(design.T @ design) @ (design.T @ y)
+    fitted = design @ coef
+    return float(np.var(fitted))
+
+
 def report_CI(point_and_se: Tuple[float, float], CI: float = 0.95) -> str:
     '''
     Returns a string with the point estimate and confidence interval.
@@ -129,6 +157,7 @@ __all__ = [
     'LinearRegressionResult',
     'corr',
     'fit_linear_regression',
+    'projection_variance',
     'report_CI',
     'standardize_vector',
 ]

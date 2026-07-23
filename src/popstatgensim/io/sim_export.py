@@ -17,6 +17,9 @@ import numpy as np
 
 # Relationship classes distinguished by the h2est truth-IBD build (contract §4).
 H2EST_REL_CLASSES = ('FS', 'PO', 'deg2', 'deg3', 'fine_deg')
+# Close classes whose per-pair indicator drives the class-level confound matrices (C_FS, C_PO,
+# C_eq2, C_eq3); always retained even at zero realized relatedness.
+H2EST_CLOSE_CLASSES = ('FS', 'PO', 'deg2', 'deg3')
 _DEG1_PO = {'parent', 'offspring'}
 
 
@@ -50,6 +53,33 @@ def map_rel_class(relationship: str, degree: int, *, max_degree: int = 11) -> Op
     return 'fine_deg'  # 4 <= degree <= max_degree
 
 
+def pair_class_degree_from_pedigree(ped, *, max_degree: int = 11) -> dict:
+    '''
+    Builds the ``{(i, j): (rel_class, degree)}`` mapping (i < j index order) that
+    ``export_ibd_pairs`` consumes, from a popstatgensim ``Pedigree`` whose relationships have
+    been assigned (``ped.rels`` populated via ``construct_paths`` + ``assign_relationships``).
+    Only related pairs whose h2est class is non-None (degree in 1..max_degree) are returned.
+    Parameters:
+        ped: a Pedigree with a populated ``.rels`` dict of {(i, j): RelObj}.
+        max_degree (int): drop pairs with degree above this.
+    Returns:
+        dict: {(i, j): (rel_class, degree)} for retained related pairs, i < j.
+    '''
+    rels = getattr(ped, 'rels', None)
+    if not rels:
+        raise ValueError('Pedigree has no assigned relationships; call construct_paths() + '
+                         'assign_relationships() first.')
+    out = {}
+    for (i, j), rel_obj in rels.items():
+        if i >= j:
+            continue  # store each unordered pair once (i < j)
+        rel_class = map_rel_class(rel_obj.relationship, rel_obj.degree, max_degree=max_degree)
+        if rel_class is None:
+            continue
+        out[(i, j)] = (rel_class, int(rel_obj.degree))
+    return out
+
+
 def export_ibd_pairs(
     out_path,
     relatedness: np.ndarray,
@@ -57,6 +87,7 @@ def export_ibd_pairs(
     pair_class_degree: Mapping[tuple, tuple],
     *,
     max_degree: int = 11,
+    min_relatedness: Optional[float] = None,
 ) -> Path:
     '''
     Writes the ground-truth per-pair IBD table ``ibd_pairs.tsv`` (contract §4).
@@ -68,6 +99,12 @@ def export_ibd_pairs(
         pair_class_degree (mapping): ``{(i, j): (rel_class, degree)}`` for pedigree-related index
             pairs (``i < j``). ``rel_class`` is one of H2EST_REL_CLASSES (see ``map_rel_class``);
             entries with a None ``rel_class`` or degree > ``max_degree`` are skipped.
+        min_relatedness (float | None): if set, a pair is written only when its realized
+            relatedness exceeds this threshold OR its class is a close class (H2EST_CLOSE_CLASSES,
+            whose indicators drive the confound matrices regardless of realized value). ``None``
+            (default) writes every pedigree pair. Use a small threshold (e.g. 0.0) to drop the
+            large tail of distant pairs whose realized IBD is zero (equivalent to absent → 0 on
+            the consumer side) so the table does not scale as N^2.
     Returns:
         Path: the written path. Rows are canonicalized so ``ID1 <= ID2`` by Python string compare
             (matching h2est's canon()), one row per retained related pair.
@@ -86,9 +123,13 @@ def export_ibd_pairs(
             continue
         if rel_class not in H2EST_REL_CLASSES:
             raise ValueError(f'Unknown rel_class {rel_class!r}; expected one of {H2EST_REL_CLASSES}.')
+        rel = float(relatedness[i, j])
+        if (min_relatedness is not None and rel <= min_relatedness
+                and rel_class not in H2EST_CLOSE_CLASSES):
+            continue
         id_a, id_b = iids[i], iids[j]
         id1, id2 = (id_a, id_b) if id_a <= id_b else (id_b, id_a)
-        rows.append((id1, id2, float(relatedness[i, j]), rel_class, int(degree)))
+        rows.append((id1, id2, rel, rel_class, int(degree)))
 
     # stable, deterministic ordering by (ID1, ID2)
     rows.sort(key=lambda r: (r[0], r[1]))

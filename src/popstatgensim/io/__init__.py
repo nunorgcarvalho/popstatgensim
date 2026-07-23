@@ -15,6 +15,7 @@ from .sim_export import (
     export_variants_base,
     export_variants_effects,
     map_rel_class,
+    pair_class_degree_from_pedigree,
 )
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "export_variants_effects",
     "export_json",
     "map_rel_class",
+    "pair_class_degree_from_pedigree",
 ]
