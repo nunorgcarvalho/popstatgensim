@@ -240,6 +240,92 @@ def test_prepare_reml_inputs_aligns_by_default():
     np.testing.assert_array_equal(observed['Rs'], grm[np.ix_([1, 0], [1, 0])])
 
 
+def _read_pgen_hardcalls(pgen_path, N, M):
+    pgenlib = pytest.importorskip('pgenlib')
+    reader = pgenlib.PgenReader(str(pgen_path).encode())
+    try:
+        buf = np.empty(N, dtype=np.int8)
+        back = np.empty((M, N), dtype=np.int8)
+        for v in range(M):
+            reader.read(v, buf)
+            back[v] = buf
+    finally:
+        reader.close()
+    return back.T  # N x M
+
+
+def test_export_pgen_fileset_round_trips_genotypes_and_metadata(tmp_path):
+    pytest.importorskip('pgenlib')
+    # N=4 individuals, M=3 variants; values are ALT-allele dosages 0..2
+    G = np.array(
+        [
+            [0, 2, 0],
+            [1, 2, 0],
+            [2, 1, 1],
+            [0, 0, 2],
+        ],
+        dtype=np.uint8,
+    )
+    iids = ['simB0001_1', 'simB0001_2', 'simB0001_3', 'simB0001_4']
+    prefix = tmp_path / 'chr1'
+
+    out = psg.io.export_pgen_fileset(
+        prefix,
+        G,
+        iids=iids,
+        chrom=1,
+        pos=[10, 20, 30],
+        sex=np.array([1, 0, 1, 0]),  # M, F, M, F (popstatgensim convention)
+    )
+    assert out == prefix.with_suffix('.pgen')
+
+    back = _read_pgen_hardcalls(out, N=4, M=3)
+    np.testing.assert_array_equal(back, G.astype(np.int8))
+
+    pvar_lines = (tmp_path / 'chr1.pvar').read_text().strip().splitlines()
+    assert pvar_lines[0] == '#CHROM\tPOS\tID\tREF\tALT'
+    assert pvar_lines[1].split('\t') == ['1', '10', 'chr1:10', 'A', 'G']
+    assert pvar_lines[3].split('\t')[:3] == ['1', '30', 'chr1:30']
+
+    psam_lines = (tmp_path / 'chr1.psam').read_text().strip().splitlines()
+    assert psam_lines[0] == '#FID\tIID\tSEX'
+    # FID defaults to IID; sex maps 1(M)->1, 0(F)->2
+    assert psam_lines[1].split('\t') == ['simB0001_1', 'simB0001_1', '1']
+    assert psam_lines[2].split('\t') == ['simB0001_2', 'simB0001_2', '2']
+
+
+def test_export_pgen_by_chrom_partitions_variants(tmp_path):
+    pytest.importorskip('pgenlib')
+    # 6 variants across two chromosomes: [1,1,1,2,2,2]
+    G = np.array(
+        [
+            [0, 1, 2, 0, 1, 2],
+            [2, 1, 0, 2, 1, 0],
+        ],
+        dtype=np.uint8,
+    )
+    chrom = np.array([1, 1, 1, 2, 2, 2])
+    iids = ['p_1', 'p_2']
+
+    written = psg.io.export_pgen_by_chrom(
+        tmp_path, G, chrom, iids=iids, fids=['fam', 'fam'],
+    )
+    assert [p.name for p in written] == ['chr1.pgen', 'chr2.pgen']
+
+    back1 = _read_pgen_hardcalls(tmp_path / 'chr1.pgen', N=2, M=3)
+    back2 = _read_pgen_hardcalls(tmp_path / 'chr2.pgen', N=2, M=3)
+    np.testing.assert_array_equal(back1, G[:, :3].astype(np.int8))
+    np.testing.assert_array_equal(back2, G[:, 3:].astype(np.int8))
+
+    # each per-chromosome .pvar carries only its own variants
+    assert len((tmp_path / 'chr2.pvar').read_text().strip().splitlines()) == 1 + 3
+
+
+def test_export_pgen_fileset_validates_shapes(tmp_path):
+    with pytest.raises(ValueError, match='length N'):
+        psg.io.export_pgen_fileset(tmp_path / 'x', np.zeros((3, 2)), iids=['a', 'b'])
+
+
 def test_prepare_reml_inputs_preserves_matching_order_when_ids_match():
     y = np.array([10.0, 20.0, 30.0])
     ids = np.array(['iid1', 'iid2', 'iid3'])

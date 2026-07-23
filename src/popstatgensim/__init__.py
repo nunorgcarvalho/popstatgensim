@@ -6,6 +6,8 @@ from .genome import PCAResult
 from .io import (
     align_samples,
     export_GRM_GCTA,
+    export_pgen_by_chrom,
+    export_pgen_fileset,
     export_trait,
     prepare_reml_inputs,
     read_GRM_GCTA,
@@ -35,6 +37,8 @@ __all__ = [
     "subset_grm_by_ids",
     "prepare_reml_inputs",
     "export_trait",
+    "export_pgen_fileset",
+    "export_pgen_by_chrom",
     "genome",
     "pedigree",
     "traits",
