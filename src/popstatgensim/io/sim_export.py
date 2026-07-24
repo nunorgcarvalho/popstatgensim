@@ -164,16 +164,20 @@ def export_pheno(out_path, y: Sequence[float], iids: Sequence[str],
 
 
 def export_variants_base(out_path, ids: Sequence[str], chrom: Sequence[int], pos: Sequence[int],
-                         cm: Sequence[float], maf: Sequence[float], typed: Sequence[bool]) -> Path:
+                         cm: Sequence[float], maf: Sequence[float], alt_freq: Sequence[float],
+                         typed: Sequence[bool]) -> Path:
     '''
     Writes the population-level per-variant table ``variants.base.tsv`` with columns
-    ``id chrom pos cm maf typed`` (contract §2).
+    ``id chrom pos cm maf alt_freq typed`` (contract §2).
+    ``alt_freq`` is the ALT-allele frequency matching the .pvar REF/ALT orientation (= the raw
+    allele-1 frequency ``pop.p``); h2est standardizes genotypes as (X−2p)/√(2p(1−p)) and needs this
+    per-variant p directly (``maf`` alone is insufficient since ALT is often the major allele).
     '''
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ids = list(map(str, ids))
     M = len(ids)
-    cols = {'chrom': chrom, 'pos': pos, 'cm': cm, 'maf': maf, 'typed': typed}
+    cols = {'chrom': chrom, 'pos': pos, 'cm': cm, 'maf': maf, 'alt_freq': alt_freq, 'typed': typed}
     for name, col in cols.items():
         if len(col) != M:
             raise ValueError(f'`{name}` must have length M (= len(ids)).')
@@ -181,11 +185,13 @@ def export_variants_base(out_path, ids: Sequence[str], chrom: Sequence[int], pos
     pos = np.asarray(pos, dtype=int)
     cm = np.asarray(cm, dtype=float)
     maf = np.asarray(maf, dtype=float)
+    alt_freq = np.asarray(alt_freq, dtype=float)
     typed = np.asarray(typed).astype(int)
     with out_path.open('w', encoding='utf-8') as handle:
-        handle.write('id\tchrom\tpos\tcm\tmaf\ttyped\n')
+        handle.write('id\tchrom\tpos\tcm\tmaf\talt_freq\ttyped\n')
         for k in range(M):
-            handle.write(f'{ids[k]}\t{chrom[k]}\t{pos[k]}\t{cm[k]:.6g}\t{maf[k]:.6g}\t{typed[k]}\n')
+            handle.write(f'{ids[k]}\t{chrom[k]}\t{pos[k]}\t{cm[k]:.6g}\t{maf[k]:.6g}'
+                         f'\t{alt_freq[k]:.6g}\t{typed[k]}\n')
     return out_path
 
 

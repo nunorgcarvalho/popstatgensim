@@ -96,7 +96,7 @@ def apply_shared_env(cohort, pcd, class_var, seed):
 
 
 def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, seed, am_r,
-                       n_gen, cohort_generations, commit, pcd=None):
+                       n_gen, cohort_generations, commit, pcd=None, typed_all=False):
     """Write the full two-level bundle and return a summary dict for validation.
 
     ``cohort`` is the analyzed (flattened multi-generation) population whose genotypes / phenotype /
@@ -123,10 +123,14 @@ def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, 
         cm[idx] = 100.0 * np.cumsum(r_c)
     variant_ids = [f'chr{c}:{pp}' for c, pp in zip(chrom, pos)]
 
-    # typed subset (the genotyping "array") — random, sparsified so an appreciable fraction is untyped
-    rng = np.random.default_rng(seed + 1)
-    typed = np.zeros(M, dtype=bool)
-    typed[rng.choice(M, size=m_typed, replace=False)] = True
+    # typed subset (the genotyping "array"). typed_all=True types EVERY variant (so all causal are
+    # typed → no untyped causal variance → h2_SNP ≈ h2_dir; simplifies confound-pilot interpretation).
+    if typed_all:
+        typed = np.ones(M, dtype=bool)
+    else:
+        rng = np.random.default_rng(seed + 1)
+        typed = np.zeros(M, dtype=bool)
+        typed[rng.choice(M, size=m_typed, replace=False)] = True
 
     # ----- identities -----
     iids = [f'{pop_alias}_{i + 1}' for i in range(N)]
@@ -172,7 +176,7 @@ def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, 
     # population-level
     io.export_pgen_by_chrom(geno_dir, pop.G, chrom, iids=iids, variant_ids=variant_ids,
                             pos=pos, fids=fids, sex=sex)
-    io.export_variants_base(pop_dir / 'variants.tsv', variant_ids, chrom, pos, cm, maf, typed)
+    io.export_variants_base(pop_dir / 'variants.tsv', variant_ids, chrom, pos, cm, maf, p, typed)
     # threshold out the large tail of zero-IBD distant pairs (== absent → 0 on the consumer
     # side); close classes are retained regardless for the confound matrices
     io.export_ibd_pairs(pop_dir / 'ibd_pairs.tsv', K, iids, pcd, min_relatedness=0.0)
@@ -301,6 +305,9 @@ def main():
                     help='full-sib shared-environment variance (c2_FS); 0 = off')
     ap.add_argument('--shared-env-deg3', type=float, default=0.0,
                     help='3rd-degree shared-environment variance (c2_deg3); 0 = off')
+    ap.add_argument('--typed-all', action='store_true',
+                    help='type EVERY variant (all causal typed → no untyped variance; '
+                         'simplifies confound-pilot interpretation)')
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
@@ -323,7 +330,7 @@ def main():
     summary = assemble_and_write(cohort, Path(args.out), base_pop=pop, pop_alias=args.pop_alias,
                                  m_typed=args.m_typed, seed=args.seed, am_r=args.am_r,
                                  n_gen=args.n_gen, cohort_generations=args.cohort_generations,
-                                 commit=commit, pcd=pcd)
+                                 commit=commit, pcd=pcd, typed_all=args.typed_all)
     print(f'\nBundle written to {summary["pop_dir"]}  (cohort N={cohort.N})')
     print(f'  chromosomes: {summary["n_chrom"]}   M_causal={summary["M_causal"]}  M_typed={summary["M_typed"]}')
     print(f'  relationship classes: {summary["class_counts"]}')

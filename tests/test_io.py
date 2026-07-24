@@ -399,11 +399,12 @@ def test_export_variants_base_and_effects(tmp_path):
     base = psg.io.export_variants_base(
         tmp_path / 'variants.base.tsv',
         ids, chrom=[1, 1, 2], pos=[1, 2, 1], cm=[0.0, 0.01, 0.0],
-        maf=[0.2, 0.4, 0.1], typed=[True, False, True],
+        maf=[0.2, 0.4, 0.1], alt_freq=[0.8, 0.4, 0.1], typed=[True, False, True],
     )
     blines = base.read_text().strip().splitlines()
-    assert blines[0] == 'id\tchrom\tpos\tcm\tmaf\ttyped'
-    assert blines[1].split('\t') == ['chr1:1', '1', '1', '0', '0.2', '1']
+    assert blines[0] == 'id\tchrom\tpos\tcm\tmaf\talt_freq\ttyped'
+    # maf 0.2 but alt_freq 0.8 (ALT is the major allele) — the column h2est needs
+    assert blines[1].split('\t') == ['chr1:1', '1', '1', '0', '0.2', '0.8', '1']
     assert blines[2].split('\t')[-1] == '0'  # typed=False
 
     eff = psg.io.export_variants_effects(
