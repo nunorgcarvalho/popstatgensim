@@ -71,8 +71,32 @@ def build_cohort(pop, cohort_generations):
     return cohort
 
 
+def apply_shared_env(cohort, pcd, class_var, seed):
+    """Add class-keyed shared-environment components to the cohort's trait, in place.
+
+    `class_var` maps relationship class -> target variance (e.g. {'FS': 0.15, 'deg3': 0.10}).
+    Full-sibs are injected as an exact sibship-cluster effect; deg3 (and other non-partition
+    classes) via the PSD-projected pair-indicator kernel. Returns the list of added component names.
+    """
+    from popstatgensim.traits import shared_environment_effects
+    cv = {c: v for c, v in class_var.items() if v and v > 0}
+    if not cv:
+        return []
+    cluster_labels, class_pairs = {}, {}
+    for cls in cv:
+        if cls == 'FS':
+            cluster_labels['FS'] = np.asarray(cohort.relations['full_sibs'])
+        else:
+            class_pairs[cls] = [(i, j) for (i, j), (c, d) in pcd.items() if c == cls]
+    effects = shared_environment_effects(cv, cohort.N, cluster_labels=cluster_labels,
+                                         class_pairs=class_pairs, seed=seed)
+    for eff in effects.values():
+        cohort.traits['y'].add_effect(eff)
+    return list(effects)
+
+
 def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, seed, am_r,
-                       n_gen, cohort_generations, commit):
+                       n_gen, cohort_generations, commit, pcd=None):
     """Write the full two-level bundle and return a summary dict for validation.
 
     ``cohort`` is the analyzed (flattened multi-generation) population whose genotypes / phenotype /
@@ -111,11 +135,22 @@ def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, 
 
     # ----- ground truth: relatedness + relationship classes -----
     K = compute_K_IBD(pop.Haplos)
-    pcd = io.pair_class_degree_from_pedigree(pop.ped)
+    if pcd is None:
+        pcd = io.pair_class_degree_from_pedigree(pop.ped)
 
     # ----- trait truth -----
     Vp = float(np.var(trait.y))
     var_components = {k: float(v) for k, v in trait.var.items()}
+    # shared-environment components (names 'c2_<class>'): record VC + realized per-class covariance
+    from popstatgensim.traits import realized_covariance_by_class
+    shared_env = {}
+    for comp in trait.y_:
+        if comp.startswith('c2_'):
+            shared_env[comp] = {
+                'var': float(trait.var[comp]),
+                'realized_cov_by_class': realized_covariance_by_class(
+                    np.asarray(trait.y_[comp]), pcd, ['FS', 'PO', 'deg2', 'deg3']),
+            }
     var_A_all = float(trait.var['A'])
     X_typed = standardize_G(pop.G[:, typed].astype(float), p[typed], P)
     var_A_typed = projection_variance(trait.y_['A'], X_typed)
@@ -201,6 +236,7 @@ def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, 
         },
         'am': {'AM_r_target': float(am_r), 'spouse_corr_realized': spouse_corr,
                'AM_trait': 'y', 'n_generations': int(n_gen)},
+        'shared_env': shared_env,
         'causal': {'ids': [variant_ids[j] for j in j_causal],
                    'beta_std': [float(beta_std_all[j]) for j in j_causal]},
         'provenance': {'popstatgensim_commit': commit, 'paradigm': 'B', 'seed': int(seed),
@@ -212,7 +248,7 @@ def assemble_and_write(cohort, out_root: Path, *, base_pop, pop_alias, m_typed, 
         'pop_dir': pop_dir, 'geno_dir': geno_dir, 'trait_dir': trait_dir,
         'n_chrom': int(len(chrom_starts)), 'class_counts': dict(class_counts),
         'mean_rel_by_class': mean_rel_by_class, 'Vp': Vp, 'var_A_all': var_A_all,
-        'var_A_typed': var_A_typed, 'spouse_corr': spouse_corr,
+        'var_A_typed': var_A_typed, 'spouse_corr': spouse_corr, 'shared_env': shared_env,
         'M_typed': int(typed.sum()), 'M_causal': int(len(j_causal)),
     }
 
@@ -261,13 +297,17 @@ def main():
     ap.add_argument('--cohort-generations', type=int, default=1,
                     help='past generations flattened into the analyzed cohort (1 = current + parents, '
                          'giving FS/PO/deg2/deg3)')
+    ap.add_argument('--shared-env-fs', type=float, default=0.0,
+                    help='full-sib shared-environment variance (c2_FS); 0 = off')
+    ap.add_argument('--shared-env-deg3', type=float, default=0.0,
+                    help='3rd-degree shared-environment variance (c2_deg3); 0 = off')
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
     commit = _commit_hash(repo)
     np.random.seed(args.seed)
 
-    print(f'Building stylized+AM population (N={args.N}/gen, M={args.M}, {args.chrs} chr, '
+    print(f'Building stylized population (N={args.N}/gen, M={args.M}, {args.chrs} chr, '
           f'{args.n_gen} gens, AM_r={args.am_r})...')
     pop = build_population(N=args.N, M=args.M, chrs=args.chrs,
                            meioses_per_chr=args.meioses_per_chr, m_causal=args.m_causal,
@@ -275,16 +315,24 @@ def main():
                            am_r=args.am_r, seed=args.seed, cohort_generations=args.cohort_generations)
     print(f'Flattening cohort: current + {args.cohort_generations} past generation(s)...')
     cohort = build_cohort(pop, args.cohort_generations)
+    pcd = io.pair_class_degree_from_pedigree(cohort.ped)
+    class_var = {'FS': args.shared_env_fs, 'deg3': args.shared_env_deg3}
+    added = apply_shared_env(cohort, pcd, class_var, seed=args.seed + 7)
+    if added:
+        print(f'Added shared-environment components: {added}')
     summary = assemble_and_write(cohort, Path(args.out), base_pop=pop, pop_alias=args.pop_alias,
                                  m_typed=args.m_typed, seed=args.seed, am_r=args.am_r,
                                  n_gen=args.n_gen, cohort_generations=args.cohort_generations,
-                                 commit=commit)
+                                 commit=commit, pcd=pcd)
     print(f'\nBundle written to {summary["pop_dir"]}  (cohort N={cohort.N})')
     print(f'  chromosomes: {summary["n_chrom"]}   M_causal={summary["M_causal"]}  M_typed={summary["M_typed"]}')
     print(f'  relationship classes: {summary["class_counts"]}')
     print(f'  Vp={summary["Vp"]:.3f}  h2_dir={summary["var_A_all"]/summary["Vp"]:.3f}  '
           f'h2_SNP_plim={summary["var_A_typed"]/summary["Vp"]:.3f}  '
           f'untyped_frac={1 - summary["var_A_typed"]/summary["var_A_all"]:.3f}')
+    if summary['shared_env']:
+        for comp, info in summary['shared_env'].items():
+            print(f'  {comp}: var={info["var"]:.3f}  realized_cov_by_class={info["realized_cov_by_class"]}')
     print(f'  realized spouse corr={summary["spouse_corr"]:.3f} (target {args.am_r})')
     print('\nValidating bundle...')
     ok = validate_bundle(summary)

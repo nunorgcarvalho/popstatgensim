@@ -15,7 +15,15 @@ from .io import (
     subset_grm_by_ids,
 )
 from .simulation import Population, PopulationParams, SuperPopulation
-from .traits import FixedEffect, GeneticEffect, NoiseEffect, RandomEffect, Trait
+from .traits import (
+    FixedEffect,
+    GeneticEffect,
+    NoiseEffect,
+    RandomEffect,
+    Trait,
+    realized_covariance_by_class,
+    shared_environment_effects,
+)
 
 __all__ = [
     "Population",
@@ -26,6 +34,8 @@ __all__ = [
     "FixedEffect",
     "RandomEffect",
     "NoiseEffect",
+    "shared_environment_effects",
+    "realized_covariance_by_class",
     "PCAResult",
     "run_EO_AM",
     "run_HEreg",

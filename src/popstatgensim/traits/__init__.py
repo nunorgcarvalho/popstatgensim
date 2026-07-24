@@ -9,6 +9,7 @@ from .effect_sampling import (
     get_standardized_effects,
 )
 from .effects import Effect, FixedEffect, GeneticEffect, NoiseEffect, RandomEffect
+from .environment import realized_covariance_by_class, shared_environment_effects
 from .fixed_effects import scale_binary_FE
 from .pgs import simulate_pgs_standardized_weights
 from .random_effects import (
@@ -41,6 +42,8 @@ __all__ = [
     "get_G_std_for_effects",
     "get_standardized_effects",
     "scale_binary_FE",
+    "shared_environment_effects",
+    "realized_covariance_by_class",
     "simulate_pgs_standardized_weights",
     "psd_sqrt",
     "nearest_correlation_matrix",
