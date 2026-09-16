@@ -3,6 +3,7 @@
 from . import estimation, genome, io, pedigree, plotting, simulation, traits, utils
 from .estimation import (
     AMMeasurements,
+    effective_n_variants,
     compare_to_theory,
     measure_am_quantities,
     run_EO_AM,
@@ -42,6 +43,7 @@ __all__ = [
     "run_EO_AM",
     "BaseStandardization",
     "AMMeasurements",
+    "effective_n_variants",
     "measure_am_quantities",
     "compare_to_theory",
     "run_HEreg",

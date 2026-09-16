@@ -3,6 +3,7 @@
 from .am import run_EO_AM
 from .am_equilibrium import (
     AMMeasurements,
+    effective_n_variants,
     compare_to_theory,
     measure_am_quantities,
     measure_mate_correlations,
@@ -22,6 +23,7 @@ __all__ = [
     "GWASresult",
     "run_EO_AM",
     "AMMeasurements",
+    "effective_n_variants",
     "measure_am_quantities",
     "measure_mate_correlations",
     "measure_segregation_variance",

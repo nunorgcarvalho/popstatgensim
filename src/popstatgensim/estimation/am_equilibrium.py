@@ -38,6 +38,14 @@ from ..traits.standardization import (
 )
 from ..utils.stats import corr
 
+# re-exported here so the M_e helper is importable alongside the predictions that use it
+__all__ = [
+    'AMMeasurements', 'compare_to_theory', 'effective_n_variants',
+    'measure_am_quantities', 'measure_mate_correlations', 'measure_segregation_variance',
+    'predict_VA_eq', 'predict_VA_eq_corrected', 'predict_h2_eq', 'predict_rho_g_eq',
+    'predict_seg_var',
+]
+
 
 # ---------------------------------------------------------------------------
 # Theory: the writeup's closed forms
