@@ -1188,7 +1188,8 @@ def test_simulate_generations_uses_params_with_temporary_overrides(monkeypatch):
 
     assert calls == [("next", 0.2, 0.3)]
 
-    def fake_generate_offspring(s, mu, R, n_offspring_dist, AM_r, AM_trait, AM_type):
+    def fake_generate_offspring(s, mu, R, n_offspring_dist, AM_r, AM_trait, AM_type,
+                                **mate_kwargs):
         calls.append(("offspring", s, mu, R.copy(), n_offspring_dist, AM_r, AM_trait, AM_type))
         relations = {
             key: value.copy() if isinstance(value, np.ndarray) else value

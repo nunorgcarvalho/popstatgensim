@@ -24,6 +24,7 @@ from ..plotting import common as common_plotting
 from ..plotting import genome as genome_plotting
 from ..traits import effect_sampling as trait_sampling
 from ..traits.effects import warn_if_variance_pinned_under_AM
+from . import mating as mating_utils
 from ..traits.trait import Trait
 from ..utils import matrix_metrics as utils_matrix_metrics
 from ..utils import misc as misc_utils
@@ -47,6 +48,14 @@ class PopulationParams:
     AM_r: float = 0.0
     AM_trait: Union[str, np.ndarray, None] = None
     AM_type: str = 'phenotypic'
+    # Non-monogamy (D-0005): survival array q, q_k = fraction with at least k mates.
+    # None means monogamy, q = [1]. `mate_pmf` is the alternative user-facing input.
+    mate_q: Optional[np.ndarray] = None
+    mate_pmf: Optional[np.ndarray] = None
+    # Offspring pmf f. `offspring_f` is an explicit array; otherwise n_offspring_dist
+    # names a distribution. The only constraint on f is mean(f) = 2/kappa.
+    offspring_f: Optional[np.ndarray] = None
+    forbid_mate_cycles: bool = True
     keep_past_generations: int = 1
     track_pedigree: bool = False
     track_haplotypes: bool = False
@@ -304,6 +313,14 @@ class Population:
             params.n_offspring_dist = str(value).strip().lower()
         elif name == 'AM_type':
             params.AM_type = str(value)
+        elif name == 'mate_q':
+            params.mate_q = None if value is None else mating_utils.normalize_survival(q=value)
+        elif name == 'mate_pmf':
+            params.mate_pmf = None if value is None else np.asarray(value, dtype=float)
+        elif name == 'offspring_f':
+            params.offspring_f = None if value is None else np.asarray(value, dtype=float)
+        elif name == 'forbid_mate_cycles':
+            params.forbid_mate_cycles = bool(value)
         elif name == 'keep_past_generations':
             keep_past_generations = int(value)
             if keep_past_generations < 0:
@@ -359,6 +376,10 @@ class Population:
             'AM_r',
             'AM_trait',
             'AM_type',
+            'mate_q',
+            'mate_pmf',
+            'offspring_f',
+            'forbid_mate_cycles',
             'keep_past_generations',
             'track_pedigree',
             'track_haplotypes',
@@ -732,11 +753,17 @@ class Population:
         Parameters:
             relations (dict): Dictionary of relationship matrices to update. Keys are relationship types (e.g. 'spouses', 'parents') and values are the corresponding matrices.
         '''
+        # The mating happened in the PARENT generation, so the mate graph and the compact
+        # spouse array both belong there, not on the offspring.
+        mating_keys = ('spouses', 'mate_edges', 'mate_round_id')
         for key in relations:
-            if key == 'spouses':
+            if key in mating_keys:
                 if self.keep_past_generations >= 1:
-                    self.past[1].relations['spouses'] = relations['spouses'] # updates prior spouse matrix for past gen
-                self.relations['spouses'] = np.full(self.N, -1, dtype=np.int32)
+                    self.past[1].relations[key] = relations[key]
+                if key == 'spouses':
+                    self.relations['spouses'] = np.full(self.N, -1, dtype=np.int32)
+                else:
+                    self.relations.pop(key, None)
             else:
                 self.relations[key] = relations[key] # sets other relationship matrices for current generation
 
@@ -908,6 +935,21 @@ class Population:
             _, inverse = np.unique(family_ids[valid_family], return_inverse=True)
             full_sibs_new[valid_family] = inverse.astype(np.int32)
         relations_new['full_sibs'] = full_sibs_new
+
+        # mate edges: keep only pairs where BOTH individuals survived the subset
+        old_edges = np.asarray(
+            self.relations.get('mate_edges', np.zeros((0, 2))), dtype=np.int32,
+        ).reshape(-1, 2)
+        if old_edges.shape[0] > 0:
+            mapped = idx_map[old_edges]
+            keep_edge = np.all(mapped >= 0, axis=1)
+            relations_new['mate_edges'] = mapped[keep_edge].astype(np.int32, copy=False)
+            old_rounds = np.asarray(
+                self.relations.get('mate_round_id', np.zeros(old_edges.shape[0])),
+                dtype=np.int32,
+            ).reshape(-1)
+            if old_rounds.shape[0] == keep_edge.shape[0]:
+                relations_new['mate_round_id'] = old_rounds[keep_edge]
 
         parents_new = np.full((new_pop.N, 2), -1, dtype=np.int32)
         parents_old = source_parents[i_keep, :]
@@ -1430,6 +1472,10 @@ class Population:
                     AM_r=sim_params.AM_r,
                     AM_trait=sim_params.AM_trait,
                     AM_type=sim_params.AM_type,
+                    mate_q=sim_params.mate_q,
+                    mate_pmf=sim_params.mate_pmf,
+                    offspring_f=sim_params.offspring_f,
+                    forbid_mate_cycles=sim_params.forbid_mate_cycles,
                 )
             else:
                 H = self.next_generation(s=sim_params.s, mu=sim_params.mu)
@@ -1476,66 +1522,72 @@ class Population:
         return centered * np.sqrt(target_var / observed_var)
 
     def _pair_mates(self, AM_r: float = 0, AM_trait: Union[str, np.ndarray] = None,
-                    AM_type: str = 'phenotypic') -> np.ndarray:
+                    AM_type: str = 'phenotypic',
+                    mate_q=None, mate_pmf=None,
+                    forbid_mate_cycles: bool = True):
         '''
-        Pairs individuals up monogamously to mate and generate offspring. Population size must be multiple of 2. Allows for assortative mating (AM) if specified. Also updates the spouses relationship matrix.
+        Builds the generation's mate graph, optionally with assortative mating.
+
+        Generalizes the old monogamous pairing: instead of one-to-one rank matching of
+        N/2 mothers to N/2 fathers, this runs one matching round per entry of the
+        survival array `mate_q` (D-0005), so an individual may have several mates and
+        half-sibs, step-sibs and mate chains become possible. `mate_q=None` means
+        monogamy and reproduces the previous behaviour exactly.
+
         Parameters:
-            AM_r (float): Desired correlation between AM trait values of spouses. Default is 0 (no assortative mating).
-            AM_trait (str or 1D array): If a string, the name of the trait to use for assortative mating (as stored in the object). If an array, the trait values to use for assortative mating. If None, no assortative mating is performed. Default is None.
-            AM_type (str): Type of assortative mating to perform. If 'phenotypic', uses the trait values directly. If 'genetic', uses the genetic values (only for object's stored traits). Default is 'phenotypic'.
+            AM_r (float): Target correlation between the AM trait values of mates.
+            AM_trait (str or 1D array): Trait to assort on, by name or as values.
+            AM_type (str): 'phenotypic' (default) uses trait values; 'genetic' uses the
+                genetic component. Note `Primary-AM` excludes genetic homogamy.
+            mate_q (1D array): Survival array; `mate_q[k-1]` is the fraction of
+                individuals with at least k mates. Defaults to monogamy, [1.0].
+            mate_pmf (1D array): Alternative input -- fraction with exactly k mates.
+            forbid_mate_cycles (bool): Enforce the `No-mating-loops` forest constraint.
 
         Returns:
-            tuple ((iM, iP), rel_spouses):
-            Where:
-            - iMs (1D array): Array of length N/2 containing indices of the mothers.
-            - iPs (1D array): Array of length N/2 containing indices of the fathers.
-            - rel_spouses (2D array): Relationship N*N matrix for spouses, where each element is True if the individuals are spouses and False otherwise.
+            tuple ((iMs, iPs), graph):
+            - iMs (1D array): maternal index of each mate pair (length U).
+            - iPs (1D array): paternal index of each mate pair (length U).
+            - graph (MateGraph): the full mate graph.
         '''
-        # checks for population size
-        if self.N % 2 != 0:
-            raise Exception('Population size must be multiple of 2.')
-        N2 = self.N // 2
-        spouse_idx = np.full(self.N, -1, dtype=np.int32)
-
-        # extracts assortative mating value:
+        # extracts assortative mating value
         if AM_r != 0 and AM_trait is not None:
-            if type(AM_trait) == np.ndarray:
+            if isinstance(AM_trait, np.ndarray):
                 AM_values = AM_trait
-            elif type(AM_trait) == str:
+            elif isinstance(AM_trait, str):
                 if AM_trait not in self.traits:
                     raise Exception(f'Trait {AM_trait} not found in population traits.')
                 if AM_type == 'phenotypic':
                     AM_values = self.traits[AM_trait].y
                 elif AM_type == 'genetic':
                     AM_values = self.traits[AM_trait].y_['A']
+                else:
+                    raise Exception(f'Unknown AM_type: {AM_type}.')
+            else:
+                raise Exception('AM_trait must be a trait name or an array of values.')
             # standardizes to exact empirical variance 1
             AM_values = self._rescale_empirical_variance(
-                AM_values,
-                target_var=1.0,
-                name='AM_values',
+                AM_values, target_var=1.0, name='AM_values',
             )
+            rho_y = float(AM_r)
         else:
             AM_values = np.zeros(self.N)
+            rho_y = 0.0
 
-        # extracts mom (female) and dad (male) indices and shuffles their order
-        iMs = np.random.choice(np.where(self.traits['sex'].y == 0)[0], N2, replace=False)
-        iPs = np.random.choice(np.where(self.traits['sex'].y == 1)[0], N2, replace=False)
-
-        # computes mate value
-        noise = self._rescale_empirical_variance(
-            np.random.normal(size=self.N),
-            target_var=1 - AM_r ** 2,
-            name='mate noise',
+        graph = mating_utils.build_mate_graph(
+            N=self.N,
+            sex=np.asarray(self.traits['sex'].y),
+            am_values=AM_values,
+            rho_y=rho_y,
+            q=mate_q,
+            pmf=mate_pmf,
+            forbid_cycles=forbid_mate_cycles,
+            rescale=self._rescale_empirical_variance,
         )
-        mate_values = AM_r * AM_values + noise
-        # sorts mothers and fathers by mate value
-        iMs = iMs[np.argsort(AM_values[iMs])]
-        iPs = iPs[np.argsort(mate_values[iPs])]    
-        # updates compact spouse indices
-        spouse_idx[iMs] = iPs
-        spouse_idx[iPs] = iMs
+        if graph.U == 0:
+            raise Exception('Mate graph has no mate pairs; cannot generate offspring.')
 
-        return ((iMs, iPs), spouse_idx)
+        return ((graph.edges[:, 0], graph.edges[:, 1]), graph)
 
     def _sample_offspring_pair_counts(self, P_mate: np.ndarray, N_offspring: int,
                                       n_offspring_dist: str = 'constant') -> np.ndarray:
@@ -1837,6 +1889,10 @@ class Population:
                            AM_r: float = _PARAM_UNSET,
                            AM_trait: Union[str, np.ndarray] = _PARAM_UNSET,
                            AM_type: str = _PARAM_UNSET,
+                           mate_q=_PARAM_UNSET,
+                           mate_pmf=_PARAM_UNSET,
+                           offspring_f=_PARAM_UNSET,
+                           forbid_mate_cycles: bool = _PARAM_UNSET,
                            **kwargs) -> np.ndarray:
         '''
         Pairs up mates and generates offspring from parents' haplotypes. Only works
@@ -1877,18 +1933,30 @@ class Population:
             AM_trait = self.params.AM_trait
         if AM_type is _PARAM_UNSET:
             AM_type = self.params.AM_type
+        if mate_q is _PARAM_UNSET:
+            mate_q = self.params.mate_q
+        if mate_pmf is _PARAM_UNSET:
+            mate_pmf = self.params.mate_pmf
+        if offspring_f is _PARAM_UNSET:
+            offspring_f = self.params.offspring_f
+        if forbid_mate_cycles is _PARAM_UNSET:
+            forbid_mate_cycles = self.params.forbid_mate_cycles
 
         # checks ploidy
         if self.P != 2:
             raise Exception('Offspring generation only works for diploids.')
 
-        # Assortative Mating ####        
-        # pairs up mates
-        (iMs, iPs), spouse_idx = self._pair_mates(
+        # Assortative Mating ####
+        # builds the mate graph (monogamous when mate_q is None)
+        (iMs, iPs), mate_graph = self._pair_mates(
             AM_r=AM_r,
             AM_trait=AM_trait,
             AM_type=AM_type,
+            mate_q=mate_q,
+            mate_pmf=mate_pmf,
+            forbid_mate_cycles=forbid_mate_cycles,
         )
+        spouse_idx = mate_graph.to_spouse_array()
 
         # Selection ####
         if isinstance(s, (float, int)):
@@ -1899,19 +1967,32 @@ class Population:
         else:
             s = np.asarray(s, dtype=float)
             W = np.exp(np.log1p(self.G * s[None, :]).sum(axis=1))
-        # computes each pair's breeding weight
+        # computes each pair's breeding weight. Selection is out of scope (D-0009, s=0):
+        # this is just one possible producer of the optional per-pair weight vector.
         W_pair = W[iMs] * W[iPs]
         # computs probability of each parent pair being chosen to mate for one offspring
         P_mate = W_pair / W_pair.sum()
-        # determines population size of next generation (currently maintains population size)
+        # population size is deterministic, never random (D-0005)
         N_offspring = self.N
         # draws how many offspring each mate pair has, then expands to per-offspring
-        # parent indices.
-        offspring_counts = self._sample_offspring_pair_counts(
-            P_mate=P_mate,
-            N_offspring=N_offspring,
-            n_offspring_dist=n_offspring_dist,
-        )
+        # parent indices. With U = kappa*N/2 pairs the mean is 2/kappa, which is the
+        # only constraint on the offspring pmf.
+        if offspring_f is not None:
+            allocation = mating_utils.allocate_offspring(
+                U=len(iMs), N_offspring=N_offspring, f=offspring_f, weights=P_mate,
+            )
+            offspring_counts = allocation['counts']
+            self._last_offspring_allocation = allocation
+        else:
+            offspring_counts = self._sample_offspring_pair_counts(
+                P_mate=P_mate,
+                N_offspring=N_offspring,
+                n_offspring_dist=n_offspring_dist,
+            )
+            self._last_offspring_allocation = {
+                'counts': offspring_counts, 'n_repaired': 0, 'tv_distortion': 0.0,
+                'mode': f'_sample_offspring_pair_counts({n_offspring_dist})',
+            }
         i_mate = np.repeat(np.arange(len(iMs), dtype=np.int32), offspring_counts)
         np.random.shuffle(i_mate)
         parents = np.stack((iMs[i_mate], iPs[i_mate]), axis=1).astype(np.int32, copy=False)
@@ -1955,6 +2036,8 @@ class Population:
         # updates relationship matrix for parent-child relationships
         relations = {
             'spouses': spouse_idx,
+            'mate_edges': mate_graph.edges,
+            'mate_round_id': mate_graph.round_id,
             'parents': parents,
             'parent_N': self.N,
             'parent_source': 'past',
@@ -1989,10 +2072,23 @@ class Population:
         Ns_cumsum = np.cumsum([0] + Ns)
         spouses = np.full(new_pop.N, -1, dtype=np.int32)
         full_sibs = np.full(new_pop.N, -1, dtype=np.int32)
+        mate_edge_blocks = []
+        mate_round_blocks = []
         next_family = 0
         for gen, pop_gen in enumerate(pops):
             i_start = Ns_cumsum[gen]
             i_end = Ns_cumsum[gen + 1]
+
+            # the mate graph is per-generation, so each block shifts into its own rows
+            gen_edges = np.asarray(
+                pop_gen.relations.get('mate_edges', np.zeros((0, 2))), dtype=np.int32,
+            ).reshape(-1, 2)
+            if gen_edges.shape[0] > 0:
+                mate_edge_blocks.append(gen_edges + i_start)
+                mate_round_blocks.append(np.asarray(
+                    pop_gen.relations.get('mate_round_id', np.zeros(gen_edges.shape[0])),
+                    dtype=np.int32,
+                ).reshape(-1))
 
             spouse_ids = np.asarray(pop_gen.relations['spouses'], dtype=np.int32)
             valid_spouse = spouse_ids >= 0
@@ -2069,6 +2165,14 @@ class Population:
         # actually sets relations
         new_pop.relations['full_sibs'] = full_sibs
         new_pop.relations['spouses'] = spouses
+        new_pop.relations['mate_edges'] = (
+            np.concatenate(mate_edge_blocks, axis=0).astype(np.int32, copy=False)
+            if mate_edge_blocks else np.zeros((0, 2), dtype=np.int32)
+        )
+        new_pop.relations['mate_round_id'] = (
+            np.concatenate(mate_round_blocks).astype(np.int32, copy=False)
+            if mate_round_blocks else np.zeros(0, dtype=np.int32)
+        )
 
         return new_pop
 

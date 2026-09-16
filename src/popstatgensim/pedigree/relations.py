@@ -23,6 +23,9 @@ def initialize_relations(N: int, N1: int = None, parent_source: str = 'past'):
         'parent_source': parent_source,
         'full_sibs': np.full(N, -1, dtype=np.int32),
         'spouses': np.full(N, -1, dtype=np.int32),
+        # mate graph (D-0005); populated once mating has happened in this generation
+        'mate_edges': np.zeros((0, 2), dtype=np.int32),
+        'mate_round_id': np.zeros(0, dtype=np.int32),
     }
     return relations
 

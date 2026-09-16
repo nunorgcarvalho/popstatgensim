@@ -257,3 +257,190 @@ def test_count_cycles_zero_for_a_tree():
     g = MateGraph(edges=edges, N=4, round_id=np.zeros(3))
     assert g.count_cycles() == 0
     assert not g.has_cycle()
+
+
+# ---------------------------------------------------------------------------
+# Integration: the mate graph driving an actual Population
+# ---------------------------------------------------------------------------
+
+from collections import defaultdict
+
+from popstatgensim import GeneticEffect, Population
+from popstatgensim.simulation.mating import (
+    mean_offspring_per_pair,
+    offspring_pmf,
+    predict_halfsib_fullsib_ratio,
+)
+
+
+def build_am_pop(N=600, M=80, seed=7, q=None, n_offspring_dist="poisson",
+                 offspring_f=None, AM_r=0.5):
+    np.random.seed(seed)
+    pop = Population(N=N, M=M, seed=seed)
+    pop.assign_sex()
+    pop.add_trait(
+        name="y",
+        effects={"A": GeneticEffect(var_indep=0.5, M=M, M_causal=M, name="A")},
+        var_Eps=0.5,
+    )
+    pop.set_params(AM_r=AM_r, AM_trait="y", AM_type="phenotypic",
+                   mate_q=q, n_offspring_dist=n_offspring_dist,
+                   offspring_f=offspring_f)
+    return pop
+
+
+def count_sib_pairs(pop):
+    """Returns (n_full_sib_pairs, n_half_sib_pairs) in the current generation."""
+    par = np.asarray(pop.relations["parents"])
+    by_parent = defaultdict(list)
+    for i in range(pop.N):
+        by_parent[par[i, 0]].append(i)
+        by_parent[par[i, 1]].append(i)
+    full = half = 0
+    seen = set()
+    for kids in by_parent.values():
+        for a in range(len(kids)):
+            for b in range(a + 1, len(kids)):
+                i, j = kids[a], kids[b]
+                key = (min(i, j), max(i, j))
+                if key in seen:
+                    continue
+                seen.add(key)
+                shared = len(set(par[i]) & set(par[j]))
+                if shared == 2:
+                    full += 1
+                elif shared == 1:
+                    half += 1
+    return full, half
+
+
+def test_monogamy_produces_no_half_sibs():
+    """Acceptance criterion: q = [1] with the old defaults reproduces monogamy exactly."""
+    pop = build_am_pop(q=None)
+    pop.simulate_generations(1)
+    full, half = count_sib_pairs(pop)
+    assert half == 0
+    assert full > 0
+
+
+@pytest.mark.parametrize("q2", [0.3, 0.6, 1.0])
+def test_non_monogamy_produces_half_sibs(q2):
+    pop = build_am_pop(q=[1.0, q2])
+    pop.simulate_generations(1)
+    full, half = count_sib_pairs(pop)
+    assert half > 0, "multi-mate individuals must produce half-sibs"
+    assert full > 0
+
+
+@pytest.mark.parametrize("q2", [None, 0.3, 0.6, 1.0])
+def test_population_size_is_exactly_N_every_generation(q2):
+    """Population size is deterministic, never random (D-0005)."""
+    N = 600
+    pop = build_am_pop(N=N, q=(None if q2 is None else [1.0, q2]))
+    for _ in range(3):
+        pop.simulate_generations(1)
+        assert pop.N == N
+        assert pop.G.shape[0] == N
+
+
+@pytest.mark.parametrize("q2", [None, 0.5])
+def test_population_size_exact_for_arbitrary_f_allocation(q2):
+    """The iid+repair mode must also land on exactly N."""
+    N = 600
+    q = normalize_survival(q=([1.0, q2] if q2 else None))
+    f = offspring_pmf("negative_binomial", mean_offspring_per_pair(q), overdispersion=2.0)
+    pop = build_am_pop(N=N, q=(None if q2 is None else [1.0, q2]), offspring_f=f)
+    pop.simulate_generations(1)
+    assert pop.N == N
+    alloc = pop._last_offspring_allocation
+    assert alloc["counts"].sum() == N
+    assert alloc["mode"] == "iid+repair"
+
+
+def test_mate_pair_count_matches_kappa_in_population():
+    N = 600
+    for q2 in (0.3, 0.6):
+        pop = build_am_pop(N=N, q=[1.0, q2])
+        pop.simulate_generations(1)
+        U = pop.past[1].relations["mate_edges"].shape[0]
+        assert U == pytest.approx((1.0 + q2) * N / 2, rel=0.02)
+
+
+def test_mate_graph_is_stored_on_the_parent_generation():
+    """The mating happened in the parent generation, so the graph belongs there."""
+    pop = build_am_pop(q=[1.0, 0.5])
+    pop.simulate_generations(1)
+    assert pop.past[1].relations["mate_edges"].shape[0] > 0
+    # the offspring generation has not mated yet
+    assert pop.relations.get("mate_edges", np.zeros((0, 2))).shape[0] == 0
+
+
+@pytest.mark.parametrize("q2", [0.3, 0.6, 1.0])
+def test_halfsib_fullsib_ratio_tracks_the_design_formula(q2):
+    """The design formula is an approximation -- verified empirically, not trusted."""
+    pop = build_am_pop(N=1000, M=100, q=[1.0, q2])
+    pop.simulate_generations(1)
+    full, half = count_sib_pairs(pop)
+    q = normalize_survival(q=[1.0, q2])
+    f = offspring_pmf("poisson", mean_offspring_per_pair(q))
+    predicted = predict_halfsib_fullsib_ratio(q, f)
+    observed = half / full
+    assert observed == pytest.approx(predicted, rel=0.15)
+
+
+def test_full_sibs_relation_still_identifies_full_sibships():
+    """relations['full_sibs'] is the mate-pair id, which generalizes correctly."""
+    pop = build_am_pop(q=[1.0, 0.6])
+    pop.simulate_generations(1)
+    par = np.asarray(pop.relations["parents"])
+    fam = np.asarray(pop.relations["full_sibs"])
+    # same family id must mean both parents shared
+    for fid in np.unique(fam[fam >= 0])[:20]:
+        members = np.flatnonzero(fam == fid)
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                assert set(par[members[a]]) == set(par[members[b]])
+    # and _get_full_sibships must still work
+    sibships = pop._get_full_sibships()
+    assert sum(len(s) for s in sibships) == pop.N
+
+
+def test_spouse_array_still_available_for_monogamous_consumers():
+    pop = build_am_pop(q=[1.0, 0.5])
+    pop.simulate_generations(1)
+    spouse = np.asarray(pop.past[1].relations["spouses"])
+    assert spouse.shape == (pop.past[1].N,)
+    paired = spouse >= 0
+    # symmetric where defined
+    assert np.all(spouse[spouse[paired]] == np.flatnonzero(paired))
+
+
+def test_flatten_generations_shifts_mate_edges():
+    """flatten_generations must carry the mate graph across, shifted per generation."""
+    pop = build_am_pop(N=400, M=60, q=[1.0, 0.5])
+    pop.set_params(keep_past_generations=2, track_pedigree=True)
+    pop.simulate_generations(2)
+    flat = pop.flatten_generations(generations=2)
+
+    edges = np.asarray(flat.relations["mate_edges"])
+    assert edges.shape[0] > 0
+    # every index must be in range for the combined population
+    assert edges.min() >= 0 and edges.max() < flat.N
+    # rounds carry across with matching length
+    assert flat.relations["mate_round_id"].shape[0] == edges.shape[0]
+
+
+def test_subset_individuals_drops_mate_edges_with_a_removed_partner():
+    pop = build_am_pop(N=400, M=60, q=[1.0, 0.5])
+    pop.simulate_generations(1)
+    parent = pop.past[1]
+    n_before = parent.relations["mate_edges"].shape[0]
+    assert n_before > 0
+
+    keep = np.arange(0, parent.N, 2)  # keep half
+    subset = parent.subset_individuals(keep)
+    edges = np.asarray(subset.relations["mate_edges"])
+    # dropping half the individuals must drop edges, and every survivor index is valid
+    assert edges.shape[0] < n_before
+    if edges.shape[0] > 0:
+        assert edges.min() >= 0 and edges.max() < subset.N
