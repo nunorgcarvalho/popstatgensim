@@ -516,3 +516,67 @@ def test_compare_to_theory_includes_corrected_VA_row():
     assert "eq:VA-eq-correction" in cmp
     # the corrected prediction must sit below the plain one
     assert cmp["eq:VA-eq-correction"]["predicted"] < cmp["eq:VA-eq"]["predicted"]
+
+
+# ---------------------------------------------------------------------------
+# Covariance-free h2 (GE-indep) and the g-e diagnostic
+# ---------------------------------------------------------------------------
+
+def test_V_E_is_exact_and_pinned_by_noise_effect():
+    """y = g + e, so Var[y - g] = Var[e] exactly -- no covariance term leaks in."""
+    pop = build_pop(N=2000, M=200, h2_0=0.4, seed=40)
+    m = measure_am_quantities(pop, "y")
+    # NoiseEffect defaults to force_var=True, which is correct: the writeup holds V_E fixed
+    assert m.V_E == pytest.approx(0.6, rel=1e-9)
+
+
+def test_h2_cov_free_matches_writeup_definition():
+    pop = build_pop(N=2000, M=200, h2_0=0.5, seed=41)
+    m = measure_am_quantities(pop, "y")
+    assert m.h2_cov_free == pytest.approx(m.V_A / (m.V_A + m.V_E), rel=1e-12)
+    # the empirical-V_Y version differs by exactly the realized g-e covariance
+    assert m.h2 == pytest.approx(m.V_A / m.V_Y, rel=1e-12)
+
+
+def test_corr_g_e_is_small_and_reported():
+    """GE-indep assumes this is zero; we report it rather than absorb it."""
+    N = 4000
+    pop = build_pop(N=N, M=200, h2_0=0.5, seed=42)
+    m = measure_am_quantities(pop, "y")
+    assert m.corr_g_e is not None
+    # ordinary sampling noise: should sit within a few 1/sqrt(N)
+    assert abs(m.corr_g_e) < 5.0 / np.sqrt(N)
+
+
+def test_both_boxed_forms_of_hsq_eq_agree_under_cov_free_h2():
+    """The two boxed forms of eq:hsq-eq are algebraically identical.
+
+    Fed an empirically measured V_Y^(0) they disagree, because that absorbs the realized
+    g-e covariance. Fed the covariance-free h2_0 they agree by construction -- which is
+    the reason to prefer it.
+    """
+    pop = build_pop(N=4000, M=300, h2_0=0.5, seed=43)
+    m = measure_am_quantities(pop, "y")
+    rho_g = 0.28
+
+    form1 = predict_h2_eq(m.h2_cov_free, rho_g)
+    form2 = m.V_A / (m.V_A + (1.0 - rho_g) * m.V_E)
+    assert form1 == pytest.approx(form2, rel=1e-12)
+
+    # with the empirical-V_Y h2_0 the two forms do NOT agree
+    form1_noisy = predict_h2_eq(m.h2, rho_g)
+    assert form1_noisy != pytest.approx(form2, rel=1e-9)
+
+
+def test_compare_to_theory_cov_free_flag_selects_the_measured_h2():
+    pop = build_pop(N=1000, M=200, seed=44)
+    std = BaseStandardization.from_population(pop)
+    base = measure_am_quantities(pop, "y", standardization=std)
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+    pop.simulate_generations(3)
+    m = measure_am_quantities(pop, "y", standardization=std)
+
+    free = compare_to_theory(m, VA_0=base.V_A, h2_0=base.h2_cov_free, cov_free=True)
+    noisy = compare_to_theory(m, VA_0=base.V_A, h2_0=base.h2_cov_free, cov_free=False)
+    assert free["eq:hsq-eq"]["measured"] == pytest.approx(m.h2_cov_free)
+    assert noisy["eq:hsq-eq"]["measured"] == pytest.approx(m.h2)

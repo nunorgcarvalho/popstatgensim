@@ -150,7 +150,7 @@ def predict_VA_eq_corrected(VA_0: float, rho_g: float, M_e: float) -> float:
 
 @dataclass
 class AMMeasurements:
-    """Realized quantities read off one simulated generation.
+    r"""Realized quantities read off one simulated generation.
 
     ``V_A``, ``V_Y`` and ``h2`` describe generation ``t``. ``rho_y`` and ``rho_g``
     describe the **mating that produced** generation ``t`` -- they are measured among
@@ -169,6 +169,19 @@ class AMMeasurements:
     * ``V_A_from_effects`` and ``V_A_from_effects_current_std`` are ``sum(beta^2)``
       under the pinned and the per-generation standardization respectively. The gap
       between *those* two is pure allele-frequency unit drift.
+
+    Two heritabilities are reported and they differ by a covariance term:
+
+    * ``h2`` is ``V_A / V_Y`` with ``V_Y`` measured empirically, so it absorbs the
+      realized genetic-environmental covariance.
+    * ``h2_cov_free`` is ``V_A / (V_A + V_E)``, which is the writeup's definition under
+      ``GE-indep`` -- that assumption says the covariance is zero, so measuring ``V_Y``
+      empirically adds it back in. ``h2_cov_free`` is both more faithful to the writeup
+      and strictly quieter, and it makes the two boxed forms of ``\eqref{eq:hsq-eq}``
+      agree by construction. **Prefer it when feeding the predictions.**
+
+    ``corr_g_e`` reports the realized correlation the assumption sets to zero, so the
+    thing being assumed away is visible rather than silently absorbed.
 
     ``standardization`` names the pinned standardization these were computed against, so
     a pinned figure is never confused with a per-generation one.
@@ -189,6 +202,9 @@ class AMMeasurements:
     V_A_from_effects_current_std: Optional[float] = None
     M_e: Optional[float] = None
     sum_beta4: Optional[float] = None
+    V_E: Optional[float] = None
+    h2_cov_free: Optional[float] = None
+    corr_g_e: Optional[float] = None
     parent_h2: Optional[float] = None
     parent_V_A: Optional[float] = None
     n_mate_pairs: Optional[int] = None
@@ -325,6 +341,15 @@ def measure_am_quantities(pop, trait: str,
 
     h2 = float(V_A / V_Y) if V_Y > 0 else float('nan')
 
+    # V_E is exact: y = g + e, so Var[y - g] = Var[e] with no covariance term.
+    y_vec = np.asarray(trait_obj.y, dtype=float)
+    g_vec = np.asarray(trait_obj.y_[component], dtype=float)
+    e_vec = y_vec - g_vec
+    V_E = float(np.var(e_vec))
+    h2_cov_free = float(V_A / (V_A + V_E)) if (V_A + V_E) > 0 else float('nan')
+    corr_g_e = (float(corr(g_vec, e_vec))
+                if g_vec.std() > 0 and e_vec.std() > 0 else float('nan'))
+
     # sum(beta^2) under both standardizations -- the pair that exposes unit drift.
     VA_eff_pinned = (var_A_from_effects(pop, trait, standardization, component=component)
                      if standardization is not None else None)
@@ -378,6 +403,9 @@ def measure_am_quantities(pop, trait: str,
         V_A_from_effects_current_std=VA_eff_current,
         M_e=me['M_e'],
         sum_beta4=me['sum_beta4'],
+        V_E=V_E,
+        h2_cov_free=h2_cov_free,
+        corr_g_e=corr_g_e,
         parent_h2=parent_h2,
         parent_V_A=parent_V_A,
         n_mate_pairs=n_pairs,
@@ -386,8 +414,9 @@ def measure_am_quantities(pop, trait: str,
     )
 
 
-def compare_to_theory(measured: AMMeasurements, VA_0: float, h2_0: float) -> dict:
-    """Evaluates the four equilibrium predictions at **measured** inputs.
+def compare_to_theory(measured: AMMeasurements, VA_0: float, h2_0: float,
+                      cov_free: bool = True) -> dict:
+    r"""Evaluates the four equilibrium predictions at **measured** inputs.
 
     Each entry reports the predicted value, the measured value, and the relative error
     ``(measured - predicted) / predicted``.
@@ -396,7 +425,14 @@ def compare_to_theory(measured: AMMeasurements, VA_0: float, h2_0: float) -> dic
         measured: Output of :func:`measure_am_quantities`, at equilibrium.
         VA_0: Base-generation additive variance, in the SAME units as
             ``measured.V_A`` -- i.e. measured against the same pinned standardization.
-        h2_0: Base-generation heritability.
+        h2_0: Base-generation heritability. Pass the **covariance-free** value,
+            ``V_A^(0) / (V_A^(0) + V_E)`` (``AMMeasurements.h2_cov_free``): the writeup's
+            ``GE-indep`` sets the genetic-environmental covariance to zero, so an
+            empirically measured ``V_Y^(0)`` adds it back in and injects noise larger
+            than the effects being tested.
+        cov_free: Whether to compare against ``measured.h2_cov_free`` rather than
+            ``measured.h2``, so both sides of ``\eqref{eq:hsq-eq}`` use the same
+            definition. Default True.
 
     Returns:
         A dict keyed by writeup equation label. ``eq:rhog-eq`` is predicted from
@@ -427,7 +463,8 @@ def compare_to_theory(measured: AMMeasurements, VA_0: float, h2_0: float) -> dic
         if measured.M_e is not None and np.isfinite(measured.M_e) and measured.M_e > 0:
             out['eq:VA-eq-correction'] = _entry(
                 predict_VA_eq_corrected(VA_0, rho_g, measured.M_e), measured.V_A)
-        out['eq:hsq-eq'] = _entry(predict_h2_eq(h2_0, rho_g), measured.h2)
+        measured_h2 = measured.h2_cov_free if (cov_free and measured.h2_cov_free is not None) else measured.h2
+        out['eq:hsq-eq'] = _entry(predict_h2_eq(h2_0, rho_g), measured_h2)
         out['eq:g-seg-var'] = _entry(predict_seg_var(measured.V_A, rho_g), measured.var_eps_o)
     else:
         for key in ('eq:VA-eq', 'eq:VA-eq-correction', 'eq:hsq-eq', 'eq:g-seg-var'):

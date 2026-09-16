@@ -482,3 +482,259 @@ def measure_mate_chain_correlation(graph: MateGraph, values: np.ndarray) -> dict
 
     return {'corr': corr, 'n_triples': len(left),
             'rho_y': rho_y, 'rho_y_squared': rho_y ** 2}
+
+
+# ---------------------------------------------------------------------------
+# Stage B -- offspring allocation
+# ---------------------------------------------------------------------------
+
+VALID_OFFSPRING_DISTS = ('poisson', 'deterministic', 'negative_binomial',
+                         'zero_inflated_poisson')
+
+
+def offspring_pmf(dist: str, m: float, n_max: int = None, **params) -> np.ndarray:
+    """Builds an offspring-per-mate-pair pmf ``f`` with mean exactly ``m``.
+
+    ``m = 2 / kappa`` is the only constraint on ``f`` (D-0005); its shape is otherwise
+    free, and ``f_0`` is the childless fraction, which needs no separate parameter.
+
+    Parameters:
+        dist: One of ``'poisson'``, ``'deterministic'``, ``'negative_binomial'``,
+            ``'zero_inflated_poisson'``. Each is auto-parameterized so its mean is ``m``.
+        m: Target mean offspring per mate pair.
+        n_max: Truncation point for the unbounded distributions. Defaults to a value
+            comfortably beyond the mean.
+        **params: ``overdispersion`` (> 1) for ``'negative_binomial'``; ``f_zero`` (the
+            childless fraction) for ``'zero_inflated_poisson'``.
+
+    Returns:
+        1D array ``f`` with ``f[k]`` the probability of ``k`` offspring, normalized and
+        with mean ``m`` to within floating point.
+    """
+    dist = str(dist).strip().lower()
+    if dist not in VALID_OFFSPRING_DISTS:
+        raise ValueError(f'`dist` must be one of {list(VALID_OFFSPRING_DISTS)}, got {dist!r}.')
+    m = float(m)
+    if m <= 0:
+        raise ValueError(f'`m` must be positive, got {m}.')
+    if n_max is None:
+        n_max = max(8, int(np.ceil(m * 6)) + 4)
+
+    k = np.arange(n_max + 1, dtype=float)
+
+    if dist == 'deterministic':
+        # counts as equal as possible: mass only on floor(m) and ceil(m)
+        lo = int(np.floor(m))
+        f = np.zeros(n_max + 1, dtype=float)
+        if np.isclose(m, lo):
+            f[lo] = 1.0
+        else:
+            f[lo] = 1.0 - (m - lo)
+            f[lo + 1] = m - lo
+        return f
+
+    if dist == 'poisson':
+        from scipy.stats import poisson as _poisson
+        f = _poisson.pmf(k, m)
+
+    elif dist == 'negative_binomial':
+        overdispersion = float(params.get('overdispersion', 2.0))
+        if overdispersion <= 1.0:
+            raise ValueError('`overdispersion` must exceed 1 for a negative binomial.')
+        # var = m * overdispersion  ->  r = m / (overdispersion - 1), p = 1/overdispersion
+        from scipy.stats import nbinom as _nbinom
+        r = m / (overdispersion - 1.0)
+        p = 1.0 / overdispersion
+        f = _nbinom.pmf(k, r, p)
+
+    else:  # zero_inflated_poisson
+        f_zero = float(params.get('f_zero', 0.2))
+        if not 0.0 <= f_zero < 1.0:
+            raise ValueError('`f_zero` must lie in [0, 1).')
+        from scipy.stats import poisson as _poisson
+        # inflate zeros but keep the overall mean at m: the Poisson part has mean m/(1-f_zero)
+        lam = m / (1.0 - f_zero)
+        f = (1.0 - f_zero) * _poisson.pmf(k, lam)
+        f[0] += f_zero
+
+    f = np.asarray(f, dtype=float)
+    f = f / f.sum()
+    # truncation shifts the mean slightly; nudge the tail so the mean is exactly m
+    return _retarget_mean(f, m)
+
+
+def _retarget_mean(f: np.ndarray, m: float) -> np.ndarray:
+    """Rescales a truncated pmf so its mean is exactly ``m``, preserving shape."""
+    k = np.arange(len(f), dtype=float)
+    current = float(np.sum(k * f))
+    if np.isclose(current, m, rtol=1e-12, atol=1e-15):
+        return f
+    # move mass between the low and high halves until the mean matches
+    for _ in range(200):
+        current = float(np.sum(k * f))
+        err = m - current
+        if abs(err) < 1e-13:
+            break
+        # tilt exponentially: f_k *= exp(theta * k), which preserves the family's shape
+        var = float(np.sum((k - current) ** 2 * f))
+        if var <= 0:
+            break
+        theta = err / var
+        f = f * np.exp(theta * k)
+        f = f / f.sum()
+    return f
+
+
+def pmf_mean(f: np.ndarray) -> float:
+    """Mean of an offspring pmf."""
+    f = np.asarray(f, dtype=float)
+    return float(np.sum(np.arange(len(f), dtype=float) * f))
+
+
+def pmf_dispersion(f: np.ndarray) -> float:
+    """``D = (E[n^2] - m) / m^2``, the dispersion that enters the sibship design formula.
+
+    ``D = 1`` for Poisson and ``1 - 1/m`` for deterministic counts.
+    """
+    f = np.asarray(f, dtype=float)
+    k = np.arange(len(f), dtype=float)
+    m = float(np.sum(k * f))
+    e_k2 = float(np.sum(k ** 2 * f))
+    return (e_k2 - m) / m ** 2
+
+
+def validate_offspring_pmf(f: np.ndarray, kappa: float, tol: float = 1e-6) -> np.ndarray:
+    """Validates a user-supplied ``f`` against the single constraint ``mean(f) = 2/kappa``."""
+    f = np.asarray(f, dtype=float).ravel()
+    if f.ndim != 1 or f.size == 0:
+        raise ValueError('`f` must be a non-empty 1D array.')
+    if np.any(f < 0):
+        raise ValueError('`f` must be non-negative.')
+    total = f.sum()
+    if not np.isclose(total, 1.0, atol=1e-8):
+        raise ValueError(f'`f` must sum to 1, got {total:.8g}.')
+    target = 2.0 / float(kappa)
+    mean = pmf_mean(f)
+    if abs(mean - target) > tol:
+        raise ValueError(
+            f'mean(f) must equal 2/kappa = {target:.8g} (D-0005), got {mean:.8g}. '
+            'This is the only constraint on f; adjust its shape to hit the mean.'
+        )
+    return f
+
+
+def allocate_offspring(U: int, N_offspring: int,
+                       f: Optional[np.ndarray] = None,
+                       dist: str = 'poisson',
+                       weights: Optional[np.ndarray] = None) -> dict:
+    """Allocates exactly ``N_offspring`` offspring across ``U`` mate pairs.
+
+    Population size is **deterministic, never random** (D-0005), so both modes return
+    counts summing to exactly ``N_offspring``.
+
+    Two modes:
+
+    * **Poisson-shaped** (``f=None, dist='poisson'``): a multinomial allocation of
+      exactly ``N_offspring`` across the pairs IS Poisson conditioned on the sum, so the
+      exact total comes for free with no repair.
+    * **Arbitrary ``f``**: sample iid from ``f``, then repair to exactly
+      ``N_offspring`` by incrementing or decrementing randomly chosen pairs. The
+      distortion this introduces is measured and returned rather than hidden.
+
+    Parameters:
+        U: Number of mate pairs.
+        N_offspring: Exact number of offspring to allocate.
+        f: Offspring pmf. ``None`` uses ``dist``.
+        dist: Named distribution when ``f`` is not given.
+        weights: Optional per-pair weight vector, default uniform. Fitness/selection is
+            deliberately out of scope (D-0009, ``s = 0``); the existing
+            ``W = exp(sum(log1p(G*s)))`` computation is just one possible producer of
+            this vector.
+
+    Returns:
+        dict with ``counts`` (length-``U`` int array summing to ``N_offspring``),
+        ``n_repaired``, ``tv_distortion`` (total-variation distance between the realized
+        count distribution and the target ``f``, or 0 for the multinomial mode), and
+        ``mode``.
+    """
+    if U <= 0:
+        raise ValueError('`U` must be positive.')
+    if N_offspring < 0:
+        raise ValueError('`N_offspring` must be non-negative.')
+
+    if weights is None:
+        w = np.full(U, 1.0 / U)
+    else:
+        w = np.asarray(weights, dtype=float).ravel()
+        if w.shape[0] != U:
+            raise ValueError(f'`weights` must have length U = {U}, got {w.shape[0]}.')
+        if np.any(w < 0):
+            raise ValueError('`weights` must be non-negative.')
+        s = w.sum()
+        if s <= 0:
+            raise ValueError('`weights` must sum to a positive value.')
+        w = w / s
+
+    if f is None and str(dist).strip().lower() == 'poisson':
+        counts = np.random.multinomial(N_offspring, w).astype(np.int32, copy=False)
+        return {'counts': counts, 'n_repaired': 0, 'tv_distortion': 0.0,
+                'mode': 'multinomial(poisson)'}
+
+    m = N_offspring / U
+    if f is None:
+        f = offspring_pmf(dist, m)
+    f = np.asarray(f, dtype=float).ravel()
+    f = f / f.sum()
+
+    counts = np.random.choice(len(f), size=U, p=f).astype(np.int64, copy=False)
+
+    # repair to exactly N_offspring
+    n_repaired = 0
+    diff = int(N_offspring - counts.sum())
+    if diff > 0:
+        idx = np.random.choice(U, size=diff, replace=True, p=w)
+        np.add.at(counts, idx, 1)
+        n_repaired = diff
+    elif diff < 0:
+        need = -diff
+        n_repaired = need
+        while need > 0:
+            eligible = np.flatnonzero(counts > 0)
+            if eligible.size == 0:
+                raise ValueError('Cannot reduce offspring counts below zero; check f and N.')
+            take = min(need, eligible.size)
+            idx = np.random.choice(eligible, size=take, replace=False)
+            counts[idx] -= 1
+            need -= take
+
+    counts = counts.astype(np.int32, copy=False)
+
+    # how far the repair moved the realized distribution away from f
+    n_max = max(len(f), int(counts.max()) + 1)
+    realized = np.bincount(counts, minlength=n_max).astype(float) / U
+    target = np.zeros(n_max, dtype=float)
+    target[:len(f)] = f
+    tv = 0.5 * float(np.abs(realized - target).sum())
+
+    return {'counts': counts, 'n_repaired': n_repaired, 'tv_distortion': tv,
+            'mode': 'iid+repair'}
+
+
+def predict_halfsib_fullsib_ratio(q: np.ndarray, f: np.ndarray) -> float:
+    """Design formula for the half-sib : full-sib pair ratio.
+
+    ``ratio ~= 2 E[K(K-1)] / (kappa D)`` with ``E[K(K-1)] = 2 sum_{k>=2} (k-1) q_k`` and
+    ``D`` the dispersion of ``f``. For the two-state case ``q = [1, q_2]`` with Poisson
+    offspring this reduces to ``4 q_2 / (1 + q_2)``.
+
+    This is an **approximation**, meant for aiming parameters at a target sibship
+    mixture. Verify it empirically rather than trusting it.
+    """
+    q = np.asarray(q, dtype=float).ravel()
+    kappa = float(np.sum(q))
+    k_idx = np.arange(1, len(q) + 1, dtype=float)
+    e_k_km1 = 2.0 * float(np.sum((k_idx - 1.0) * q))
+    D = pmf_dispersion(f)
+    if np.isclose(kappa * D, 0.0):
+        return float('nan')
+    return float(2.0 * e_k_km1 / (kappa * D))
