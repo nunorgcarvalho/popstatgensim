@@ -470,3 +470,62 @@ def test_mate_correlations_use_all_mates_not_just_the_first():
 
     out = measure_mate_correlations(parent, "y")
     assert out["n_mate_pairs"] == n_edges
+
+
+def test_n_mates_never_exceeds_the_number_of_rounds():
+    """Regression: repair once re-used an already-matched partner, giving 2 mates in 1 round."""
+    N, sex, y = 2000, None, None
+    rng = np.random.default_rng(3)
+    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
+    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+    for q in ([1.0], [1.0, 0.2], [1.0, 0.6], [1.0, 0.5, 0.25]):
+        g = build_mate_graph(N, sex, y, rho_y=0.5, q=q)
+        assert g.n_mates().max() <= len(q), f"q={q} produced {g.n_mates().max()} mates"
+
+
+def test_round_rho_y_is_measured_per_round():
+    N = 4000
+    rng = np.random.default_rng(11)
+    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
+    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+    g = build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 0.6])
+    out = measure_mate_chain_correlation(g, y)
+    assert out["round_rho_y"].shape[0] == 2
+    assert np.all(np.abs(out["round_rho_y"] - 0.5) < 0.08)
+
+
+def test_per_round_product_is_the_correct_chain_target():
+    """eq:chain-y's rho_y^2 assumes every round realizes the SAME rho_y.
+
+    Round k > 1 matches inside a pool of q_k*N/2 rather than N/2, and the constraint
+    rejections concentrate there, so its realized rho_y can attenuate. The product of
+    the measured per-round correlations is the right target; comparing against the
+    nominal square would charge that calibration difference to the coupling.
+    """
+    N = 4000
+    rng = np.random.default_rng(12)
+    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
+    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+
+    # small round-2 pool: attenuation is visible
+    small = measure_mate_chain_correlation(
+        build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 0.3]), y)
+    assert small["round_rho_y"][1] < small["round_rho_y"][0]
+    assert small["rho_y_product"] < small["rho_y_squared"]
+
+    # large round-2 pool: the two targets converge
+    large = measure_mate_chain_correlation(
+        build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 1.0]), y)
+    assert large["rho_y_product"] == pytest.approx(large["rho_y_squared"], rel=0.02)
+
+
+def test_chain_correlation_matches_both_targets_within_error():
+    """The headline mechanism check, against both targets."""
+    N = 4000
+    rng = np.random.default_rng(13)
+    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
+    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+    out = measure_mate_chain_correlation(
+        build_mate_graph(N, sex, y, rho_y=0.7, q=[1.0, 0.6]), y)
+    assert out["corr"] == pytest.approx(out["rho_y_product"], rel=0.10)
+    assert out["corr"] == pytest.approx(out["rho_y_squared"], rel=0.10)

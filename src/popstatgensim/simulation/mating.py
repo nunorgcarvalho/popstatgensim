@@ -444,45 +444,79 @@ def _apply_constraints(ordered_f, ordered_m, uf, seen_pairs, relative_of):
 def measure_mate_chain_correlation(graph: MateGraph, values: np.ndarray) -> dict:
     """Correlation between the values of one individual's two mates.
 
-    The rounds mechanism predicts ``Corr(y_j, y_k) = rho_y^2`` for two mates ``j, k`` of
-    the same individual -- the writeup's ``\\eqref{eq:chain-y}`` at ``N_mu = 2``. Because
-    different rounds carry independent noise, ``y_j`` and ``y_k`` are conditionally
-    independent given ``y_i``, so this correlation is a **prediction of the mechanism**
-    rather than something imposed. Verifying it is the key mechanism-fidelity check
-    (D-0006).
+    The rounds mechanism predicts ``Corr(y_j, y_k) = rho_y(round of j) * rho_y(round of
+    k)`` for two mates ``j, k`` of the same individual. Because different rounds carry
+    independent noise, ``y_j`` and ``y_k`` are conditionally independent given ``y_i``,
+    so this is a **prediction of the mechanism** rather than something imposed.
+    Verifying it is the key mechanism-fidelity check (D-0006).
 
-    Returns a dict with the realized correlation, the number of contributing triples,
-    and the mean realized mate correlation ``rho_y`` for comparison against its square.
+    The nominal target ``rho_y^2`` (the writeup's ``\\eqref{eq:chain-y}`` at
+    ``N_mu = 2``) is correct only when every round realizes the SAME ``rho_y``. Round
+    ``k > 1`` matches within a pool of ``q_k N / 2`` rather than ``N / 2``, and the
+    constraint rejections and nearby-rank repairs concentrate there, so its realized
+    correlation can attenuate. Comparing against the nominal square would then charge
+    that calibration difference to the coupling. Both targets are returned so the two
+    can be told apart:
+
+    * ``corr`` vs ``rho_y_product`` isolates conditional independence -- the mechanism.
+    * ``rho_y_product`` vs ``rho_y_squared`` isolates per-round calibration.
     """
     values = np.asarray(values, dtype=float).ravel()
     graph._build_index()
 
-    left, right = [], []
-    for i in range(graph.N):
-        mates = graph.mates_of(i)
+    # per-round realized rho_y, measured rather than assumed equal across rounds
+    n_rounds = (int(graph.round_id.max()) + 1) if graph.U > 0 else 1
+    round_rho = np.full(max(n_rounds, 1), np.nan, dtype=float)
+    for r in range(n_rounds):
+        sel = graph.round_id == r
+        if int(sel.sum()) < 2:
+            continue
+        a = values[graph.edges[sel, 0]]
+        b = values[graph.edges[sel, 1]]
+        if a.std() > 0 and b.std() > 0:
+            round_rho[r] = float(np.corrcoef(a, b)[0, 1])
+
+    # each individual's mates, tagged with the round the edge came from
+    mates_by_ind = [[] for _ in range(graph.N)]
+    for e in range(graph.U):
+        i0, j0 = int(graph.edges[e, 0]), int(graph.edges[e, 1])
+        r = int(graph.round_id[e])
+        mates_by_ind[i0].append((j0, r))
+        mates_by_ind[j0].append((i0, r))
+
+    left, right, prod = [], [], []
+    for mates in mates_by_ind:
         if len(mates) < 2:
             continue
-        # every unordered pair of i's mates
-        for a in range(len(mates)):
-            for b in range(a + 1, len(mates)):
-                left.append(mates[a])
-                right.append(mates[b])
+        for a_i in range(len(mates)):
+            for b_i in range(a_i + 1, len(mates)):
+                (ja, ra), (jb, rb) = mates[a_i], mates[b_i]
+                left.append(ja)
+                right.append(jb)
+                prod.append(round_rho[ra] * round_rho[rb])
+
+    if graph.U > 1:
+        ya = values[graph.edges[:, 0]]
+        yb = values[graph.edges[:, 1]]
+        rho_y = (float(np.corrcoef(ya, yb)[0, 1])
+                 if ya.std() > 0 and yb.std() > 0 else float('nan'))
+    else:
+        rho_y = float('nan')
 
     if len(left) < 2:
         return {'corr': float('nan'), 'n_triples': len(left),
-                'rho_y': float('nan'), 'rho_y_squared': float('nan')}
+                'rho_y': rho_y, 'rho_y_squared': rho_y ** 2,
+                'rho_y_product': float('nan'), 'round_rho_y': round_rho}
 
     a = values[np.array(left, dtype=np.int32)]
     b = values[np.array(right, dtype=np.int32)]
-    corr = float(np.corrcoef(a, b)[0, 1]) if a.std() > 0 and b.std() > 0 else float('nan')
+    corr_val = (float(np.corrcoef(a, b)[0, 1])
+                if a.std() > 0 and b.std() > 0 else float('nan'))
 
-    ya = values[graph.edges[:, 0]]
-    yb = values[graph.edges[:, 1]]
-    rho_y = float(np.corrcoef(ya, yb)[0, 1]) if ya.std() > 0 and yb.std() > 0 else float('nan')
-
-    return {'corr': corr, 'n_triples': len(left),
-            'rho_y': rho_y, 'rho_y_squared': rho_y ** 2}
-
+    return {'corr': corr_val, 'n_triples': len(left),
+            'rho_y': rho_y, 'rho_y_squared': rho_y ** 2,
+            'rho_y_product': float(np.nanmean(prod)),
+            'round_rho_y': round_rho}
 
 # ---------------------------------------------------------------------------
 # Stage B -- offspring allocation

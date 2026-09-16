@@ -151,7 +151,7 @@ class Population:
         self._DGRM_cache = {}
         self._X_dtype = np.float32
         self.params.R = self._generate_R_from_type(self.params.R_type)
-        self.K = np.diag(np.ones(self.N)) # kinship matrix (initially identity, not functional yet)
+        self._K = None # kinship matrix (identity placeholder, materialized lazily; not functional yet)
         # how many past generations to keep in memory
         self.past = [self]
         self.update_keep_past_gens(keep_past_generations=self.params.keep_past_generations)
@@ -474,6 +474,25 @@ class Population:
         ids = np.arange(self.N * self.P, dtype=np.int32).reshape(self.N, self.P)
         Haplos = np.broadcast_to(ids[:, None, :], self.H.shape).copy()
         self._update_obj(Haplos=Haplos)
+
+    @property
+    def K(self) -> np.ndarray:
+        '''
+        Kinship matrix. Not functional yet -- an identity placeholder.
+
+        Materialized lazily and only if something actually reads it. It is dense and
+        N*N, so eagerly allocating it cost ~128 MB per generation at N=4000 (and scales
+        as N^2) for a matrix that is exactly `np.eye(N)` by construction and that nothing
+        populates. That also sat against D-0007, which settles that relatedness is
+        computed on demand and never materialized for all pairs.
+        '''
+        if self._K is None:
+            self._K = np.eye(self.N)
+        return self._K
+
+    @K.setter
+    def K(self, value: np.ndarray):
+        self._K = None if value is None else np.asarray(value, dtype=float)
 
     @property
     def X(self) -> np.ndarray:
@@ -876,7 +895,9 @@ class Population:
         new_pop.BPs = self.BPs.copy()
         new_pop.t = self.t
         new_pop.T_breaks = copy.deepcopy(self.T_breaks)
-        new_pop.K = self.K[np.ix_(i_keep, i_keep)].copy()
+        # only propagate the kinship placeholder if something actually materialized it
+        if self._K is not None:
+            new_pop.K = self._K[np.ix_(i_keep, i_keep)].copy()
 
         if self.track_haplotypes and self.Haplos is not None:
             new_pop.Haplos = self.Haplos[i_keep, :, :].copy()
