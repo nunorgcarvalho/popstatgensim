@@ -644,25 +644,34 @@ def test_signed_and_unsigned_drift_are_different_quantities():
     F = t/(2N) prediction gives a confident wrong slope. Both are reported; neither
     substitutes for the other.
     """
-    pop = build_pop(N=2000, M=300, seed=60)
-    std = BaseStandardization.from_population(pop)
-
-    d0 = std.allele_freq_drift(pop)
+    base = build_pop(N=2000, M=300, seed=60)
+    std0 = BaseStandardization.from_population(base)
+    d0 = std0.allele_freq_drift(base)
     assert d0["rel_dhet"] == pytest.approx(0.0)
     assert d0["mean_rel_dsd"] == pytest.approx(0.0)
     assert d0["mean_het_now"] == pytest.approx(d0["mean_het_base"])
 
-    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
-    pop.simulate_generations(12)
-    d = std.allele_freq_drift(pop)
+    # D-0015: the signed quantity is a random walk whose per-draw spread exceeds the
+    # drift it measures -- a single replicate comes out POSITIVE often enough that
+    # asserting its sign on one draw is meaningless. Replicate inside the test.
+    signed, unsigned = [], []
+    for seed in range(60, 68):
+        pop = build_pop(N=2000, M=300, seed=seed)
+        std = BaseStandardization.from_population(pop)
+        pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+        pop.simulate_generations(12)
+        d = std.allele_freq_drift(pop)
+        signed.append(d["rel_dhet"])
+        unsigned.append(d["mean_rel_dsd"])
+        # these two hold per-draw, being structural rather than statistical
+        assert d["mean_rel_dsd"] > 0
+        assert d["mean_het_base"] > 0
 
-    # signed: heterozygosity is LOST under drift, so this is negative and small
-    assert d["rel_dhet"] < 0
-    assert abs(d["rel_dhet"]) < 0.05
-    # unsigned: strictly positive magnitude, and materially larger than |signed|
-    assert d["mean_rel_dsd"] > 0
-    assert d["mean_rel_dsd"] > abs(d["rel_dhet"])
-    assert d["mean_het_base"] > 0
+    # averaged, heterozygosity is LOST: the signed mean is negative and small
+    assert np.mean(signed) < 0
+    assert abs(np.mean(signed)) < 0.05
+    # the unsigned magnitude is systematically larger than the signed change
+    assert np.mean(unsigned) > abs(np.mean(signed))
 
 
 def test_unsigned_drift_grows_monotonically_while_signed_need_not():
