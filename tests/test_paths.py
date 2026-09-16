@@ -244,3 +244,63 @@ def test_chain_objects_validate():
         LinealChain(young_end=1, old_end=0, N_lin=-1)
     with pytest.raises(ValueError, match="N_mu"):
         MatingChain(start=0, end=1, N_mu=-1)
+
+
+# ---------------------------------------------------------------------------
+# Guards: inadmissible signatures and ambiguous multi-round scoring
+# ---------------------------------------------------------------------------
+
+def test_predicted_cov_rejects_an_inadmissible_1_1_chain():
+    """(N_mu=1, N_o=1) describes a path no pedigree can realize.
+
+    relate() excludes it during enumeration, but a consumer building a signature BY
+    HAND reaches predicted_cov directly -- and would silently get 1.25 where the truth
+    is 0.75. predicted_cov takes a path DESCRIPTION, not a weight, so the impossible
+    description is refused here.
+    """
+    bad = PathSignature(1, 1, ((1, 1),), 'terminal_mating', 'sink')
+    with pytest.raises(ValueError, match="inadmissible"):
+        predicted_cov(bad, V_A, RHO_Y, RHO_G)
+    with pytest.raises(ValueError, match="inadmissible"):
+        predicted_corr(bad, V_A, 1.0, RHO_Y, RHO_G)
+
+
+def test_chain_weight_1_1_is_still_defined():
+    """The exclusion is about admissible PATHS, not about the weight function."""
+    assert chain_weight(1, 1, RHO_Y, RHO_G) == pytest.approx((1 + RHO_G) / 2)
+
+
+def test_other_N_o_1_chains_are_still_accepted():
+    """Only N_mu = 1 collapses into the descent; N_mu >= 2 with N_o = 1 is fine."""
+    ok = PathSignature(1, 1, ((2, 1),), 'terminal_mating', 'sink')
+    assert predicted_cov(ok, V_A, RHO_Y, RHO_G) > 0
+
+
+def test_multi_round_chain_refuses_to_pool_silently():
+    """D-0014: no default in the ambiguous case."""
+    sig = PathSignature(2, 2, ((2, 2),), mating_round_ids=((0, 1),))
+    with pytest.raises(ValueError, match="crosses matching rounds"):
+        predicted_cov(sig, V_A, RHO_Y, RHO_G)
+
+
+def test_pooled_is_available_as_an_explicit_opt_in():
+    """The writeup's literal form stays reachable, but must be asked for."""
+    sig = PathSignature(2, 2, ((2, 2),), mating_round_ids=((0, 1),))
+    plain = PathSignature(2, 2, ((2, 2),))
+    assert predicted_cov(sig, V_A, RHO_Y, RHO_G, rho_y_by_round='pooled') == pytest.approx(
+        predicted_cov(plain, V_A, RHO_Y, RHO_G))
+
+
+def test_single_round_chains_pool_without_complaint():
+    """Both targets coincide exactly there, so requiring a decision would be noise."""
+    sig = PathSignature(2, 2, ((2, 2),), mating_round_ids=((0, 0),))
+    assert predicted_cov(sig, V_A, RHO_Y, RHO_G) == pytest.approx(
+        predicted_cov(PathSignature(2, 2, ((2, 2),)), V_A, RHO_Y, RHO_G))
+
+
+def test_mapping_gives_the_per_round_product():
+    sig = PathSignature(2, 2, ((2, 2),), mating_round_ids=((0, 1),))
+    # N_mu = 2 uses one rho_y factor, taken from the first edge's round
+    got = predicted_cov(sig, V_A, RHO_Y, RHO_G, rho_y_by_round={0: 0.3, 1: 0.9})
+    expected = V_A * chain_weight(2, 2, RHO_Y, RHO_G, rho_y_chain=[0.3])
+    assert got == pytest.approx(expected)

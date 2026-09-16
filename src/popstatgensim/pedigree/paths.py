@@ -299,31 +299,68 @@ def predicted_cov(signature: PathSignature, V_A: float, rho_y: float, rho_g: flo
         rho_g: Genetic correlation between mates. Measured, not nominal.
         phenotypic: Whether to apply the proband corrections. ``True`` returns
             ``Cov[y_A, y_B]``, ``False`` returns ``Cov[g_A, g_B]``.
-        rho_y_by_round: Optional mapping (dict or sequence) from matching-round index to
-            that round's REALIZED ``rho_y``. Only then are a signature's
-            ``mating_round_ids`` used; without it the pooled ``rho_y`` is applied to
-            every mating, which is the writeup's own closed form. Supply it when a
-            chain crosses rounds whose realized correlations differ -- round k > 1 draws
-            from a smaller pool and attenuates slightly.
+        rho_y_by_round: How to treat a chain crossing several matching rounds (D-0014).
+            A mapping from round index to that round's REALIZED ``rho_y`` gives the
+            per-round product. The string ``'pooled'`` explicitly asks for the writeup's
+            literal pooled form. ``None`` **raises** when a chain crosses two or more
+            distinct rounds, because pooling them silently is a wrong number rather than
+            an error -- there is deliberately no default in the ambiguous case. Single-
+            round and monogamous chains are pooled without complaint, since both targets
+            coincide exactly there.
 
     ``V_A``, ``rho_y`` and ``rho_g`` may be sympy symbols, in which case the closed form
     is returned symbolically -- useful for checking against the writeup's algebra and
     the pathMgr oracle directly rather than only at sampled numbers.
     """
+    # An (N_mu = 1, N_o = 1) chain describes a path that cannot correspond to a real
+    # pedigree: one mating edge feeding one descending lineal chain IS that descent,
+    # already counted as a meiosis. `relate` excludes it during enumeration, but a
+    # consumer building a signature BY HAND can reach here -- and would get 1.25 where
+    # the truth is 0.75, silently. predicted_cov takes a path DESCRIPTION, not a weight,
+    # so rejecting an impossible description belongs here. chain_weight(1, 1) is
+    # separately well defined and is deliberately left alone.
+    for N_mu, N_o in signature.mating_chains:
+        if N_mu == 1 and N_o == 1:
+            raise ValueError(
+                'Signature contains an inadmissible (N_mu=1, N_o=1) mating chain. One '
+                'mating edge feeding one descending lineal chain IS that descent, so '
+                'the path double-counts the meiosis and the entering proband wrongly '
+                'takes the terminal-mating correction 1/h^2 -- inflating the answer by '
+                '(1+rho_g)/(h^2(1+rho_y)). The writeup\'s own make_figures.py excludes '
+                'this cell ("N_mu = N_U = 1 is a meiosis, absorbed into a lineal chain"). '
+                'Use the lineal signature instead: PathSignature(n, 0, ()).'
+            )
+
     exponent = signature.sum_N_lin - signature.sum_N_o
     value = V_A * ((1 + rho_g) / 2) ** exponent
 
-    # `mating_round_ids` holds round INDICES, not correlations. They only become
-    # rho_y values once the caller supplies the realized per-round correlations; without
-    # that mapping the pooled rho_y is used, which is the writeup's own closed form.
+    # `mating_round_ids` holds round INDICES, not correlations. They become rho_y values
+    # only once the caller supplies the realized per-round correlations (D-0014).
     per_chain_rounds = signature.mating_round_ids
+    explicit_pooled = isinstance(rho_y_by_round, str) and rho_y_by_round == 'pooled'
+    mapping = None if explicit_pooled else rho_y_by_round
+
     for idx, (N_mu, N_o) in enumerate(signature.mating_chains):
-        rho_y_chain = None
-        if (rho_y_by_round is not None and per_chain_rounds is not None
-                and idx < len(per_chain_rounds)):
+        entry = None
+        if per_chain_rounds is not None and idx < len(per_chain_rounds):
             entry = per_chain_rounds[idx]
-            if entry is not None and len(entry) > 0:
-                rho_y_chain = [_round_rho_y(rho_y_by_round, r, rho_y) for r in entry]
+
+        rho_y_chain = None
+        if entry is not None and len(entry) > 0:
+            crosses_rounds = len(set(entry)) > 1
+            if mapping is None and crosses_rounds and not explicit_pooled:
+                raise ValueError(
+                    f'Mating chain {idx} crosses matching rounds {sorted(set(entry))}, '
+                    'whose realized rho_y can differ (round k > 1 matches in a smaller '
+                    'pool and attenuates). Pooling them silently would give a wrong '
+                    'NUMBER, not an error -- about 12% by N_mu = 4. Pass '
+                    'rho_y_by_round={round: realized_rho_y, ...} for the per-round '
+                    "product (D-0014), or rho_y_by_round='pooled' to ask for the "
+                    "writeup's literal pooled form deliberately."
+                )
+            if mapping is not None:
+                rho_y_chain = [_round_rho_y(mapping, r, rho_y) for r in entry]
+
         value = value * chain_weight(N_mu, N_o, rho_y, rho_g, rho_y_chain=rho_y_chain)
 
     if phenotypic:

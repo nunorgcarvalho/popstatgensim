@@ -294,11 +294,13 @@ def relate(graph: PedigreeGraph, A: int, B: int,
             every named class in the writeup's table. Per D-0010 this is a parameter
             with **no hard ceiling**, not a cap -- the correlation floor already bounds
             the search.
-        rho_y_by_round: Optional mapping from matching-round index to that round's
-            realized ``rho_y``. Round k > 1 matches in a smaller pool and attenuates
-            slightly, so a chain crossing several rounds is better predicted by the
-            product of their realized correlations than by a power of the pooled one.
-            Without this the pooled ``rho_y`` is used, which is the writeup's own form.
+        rho_y_by_round: How multi-round mate chains are scored (D-0014). A mapping from
+            round index to that round's realized ``rho_y`` gives the per-round product;
+            the string ``'pooled'`` explicitly asks for the writeup's literal pooled
+            form. ``None`` **raises** on a pedigree with more than one matching round --
+            there is deliberately no default in the ambiguous case, because pooling
+            silently is a wrong number rather than an error. Monogamous and single-round
+            pedigrees need no decision and are unaffected.
         return_all: Opt-in diagnostic. Keep popping until the queue is exhausted and
             return every candidate above the floor, so the dominant path can be
             compared against the sum of all of them -- a direct measure of how tight
@@ -309,6 +311,23 @@ def relate(graph: PedigreeGraph, A: int, B: int,
         :class:`RelateResult`.
     """
     A, B = int(A), int(B)
+
+    # D-0014: decide up front how multi-round chains are scored, rather than letting the
+    # ambiguity surface from whichever candidate happens to cross rounds first. A graph
+    # with one matching round has no ambiguity, so it needs no decision.
+    if rho_y_by_round is None and graph.mate_edges.shape[0] > 0:
+        n_rounds = int(np.max(graph.mate_round_id)) + 1 if graph.mate_round_id.size else 1
+        if n_rounds > 1:
+            raise ValueError(
+                f'This pedigree has {n_rounds} matching rounds, whose realized rho_y can '
+                'differ (round k > 1 matches in a smaller pool and attenuates), so a '
+                'mate chain crossing rounds has two different correct targets. Pooling '
+                'them silently would give a wrong NUMBER rather than an error -- about '
+                '12% by N_mu = 4. Pass rho_y_by_round={round: realized_rho_y, ...} for '
+                "the per-round product (D-0014), or rho_y_by_round='pooled' to ask for "
+                "the writeup's literal pooled form deliberately."
+            )
+
     heap = []
     seen = set()
     n_expanded = 0

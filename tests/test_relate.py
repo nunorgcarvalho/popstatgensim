@@ -1,4 +1,4 @@
-"""Tests for the local pedigree graph, on-demand relate(), and class enumeration."""
+"""Tests for the local pedigree graph, on-demand relate(, rho_y_by_round=POOLED), and class enumeration."""
 
 import numpy as np
 import pytest
@@ -14,6 +14,10 @@ from popstatgensim.pedigree.relate import (
 )
 
 RHO_Y, RHO_G, V_A, V_Y = 0.50, 0.28, 0.68, 1.18
+# D-0014: these fixtures use q2 = 0.8, i.e. two matching rounds, so every
+# relate(, rho_y_by_round=POOLED) call must state how multi-round chains are scored. "pooled" is the
+# writeup's literal form and is what these structural tests want.
+POOLED = "pooled"
 
 
 def build_pop(N=600, M=60, gens=3, q2=0.8, seed=5):
@@ -174,7 +178,7 @@ def test_relate_reproduces_the_writeup_coefficient_for_each_class(graph, spec):
     assert pairs, spec
     hits = 0
     for a, b in pairs:
-        r = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+        r = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
         if r.signature is not None and r.signature.key == expected_sig.key:
             assert r.cov == pytest.approx(expected_cov)
             hits += 1
@@ -192,10 +196,10 @@ def test_relate_names_the_named_classes(graph, spec, expected_name):
 
     Scanning rather than taking the first pair is deliberate: a pair enumerated as step
     sibs may ALSO be joined by a shorter, stronger path -- two people who share a mate
-    are co-mates, which dominates the step-sib path. relate() reporting the dominant
+    are co-mates, which dominates the step-sib path. relate(, rho_y_by_round=POOLED) reporting the dominant
     relationship there is correct, not a misclassification.
     """
-    found = [relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y).name
+    found = [relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED).name
              for a, b in enumerate_class(graph, spec, limit=40)]
     assert expected_name in found, f'{spec}: got {set(found)}'
 
@@ -219,7 +223,7 @@ def test_unrelated_pair_reports_unrelated(graph):
                 continue
             if graph.mating_chain(int(a), int(b)) is None:
                 r = relate(graph, int(a), int(b), rho_y=RHO_Y, rho_g=RHO_G,
-                           V_A=V_A, V_Y=V_Y)
+                           V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
                 if not r.related:
                     assert r.cov == 0.0
                     assert r.name == "unrelated"
@@ -231,7 +235,7 @@ def test_unrelated_pair_reports_unrelated(graph):
 
 
 def test_self_pair_is_V_A(graph):
-    r = relate(graph, 5, 5, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+    r = relate(graph, 5, 5, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
     assert r.name == "self"
     assert r.cov == pytest.approx(V_A)
 
@@ -239,26 +243,26 @@ def test_self_pair_is_V_A(graph):
 def test_relate_is_symmetric(graph):
     for spec in ("full_sibs", "half_sibs", "avuncular"):
         a, b = next(iter(enumerate_class(graph, spec, limit=1)))
-        fwd = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
-        rev = relate(graph, b, a, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+        fwd = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
+        rev = relate(graph, b, a, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
         assert fwd.cov == pytest.approx(rev.cov)
 
 
 def test_correlation_floor_prunes(graph):
     """The floor is on the phenotypic correlation, not a generation horizon."""
     a, b = next(iter(enumerate_class(graph, "first_cousins", limit=1)))
-    loose = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-6)
-    strict = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=0.9)
+    loose = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-6, rho_y_by_round=POOLED)
+    strict = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=0.9, rho_y_by_round=POOLED)
     assert loose.related
     assert not strict.related
 
 
 def test_return_all_is_opt_in_and_lists_candidates(graph):
     a, b = next(iter(enumerate_class(graph, "full_sibs", limit=1)))
-    default = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+    default = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
     assert default.all_paths is None
     diag = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
-                  return_all=True)
+                  return_all=True, rho_y_by_round=POOLED)
     assert diag.all_paths is not None and len(diag.all_paths) >= 1
     # the dominant path must be the first one popped
     assert diag.all_paths[0][0].key == diag.signature.key
@@ -268,7 +272,7 @@ def test_label_and_prediction_are_reported_separately(graph):
     """Labeling is parameter-free; prediction uses measured rho_y/rho_g. Disagreements
     are flagged rather than silently resolved."""
     a, b = next(iter(enumerate_class(graph, "full_sibs", limit=1)))
-    r = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+    r = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
     assert r.label_name is not None
     assert isinstance(r.label_agrees, bool)
 
@@ -276,7 +280,7 @@ def test_label_and_prediction_are_reported_separately(graph):
 def test_rho_y_by_round_changes_the_prediction_only_when_supplied(graph):
     """mating_round_ids are ROUND INDICES; they become rho_y only via the mapping."""
     a, b = next(iter(enumerate_class(graph, "half_sibs", limit=1)))
-    pooled = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+    pooled = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
     per_round = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
                        rho_y_by_round={0: RHO_Y, 1: RHO_Y})
     # supplying the SAME value for each round must reproduce the pooled prediction
@@ -289,13 +293,13 @@ def test_rho_y_by_round_changes_the_prediction_only_when_supplied(graph):
 
 
 # ---------------------------------------------------------------------------
-# Exactness: relate() vs exhaustive enumeration
+# Exactness: relate(, rho_y_by_round=POOLED) vs exhaustive enumeration
 # ---------------------------------------------------------------------------
 
 def test_dominant_path_equals_the_best_of_all_candidates(graph):
     """The first complete path popped must be the true maximum over all candidates.
 
-    This is the acceptance criterion that relate() agrees with exhaustive search: with
+    This is the acceptance criterion that relate(, rho_y_by_round=POOLED) agrees with exhaustive search: with
     return_all=True every candidate above the floor is listed, so the dominant one can
     be checked against the whole set rather than trusted.
     """
@@ -303,7 +307,7 @@ def test_dominant_path_equals_the_best_of_all_candidates(graph):
     for spec in ("full_sibs", "half_sibs", "step_sibs", "avuncular", "first_cousins"):
         for a, b in list(enumerate_class(graph, spec, limit=6)):
             r = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
-                       return_all=True, floor=1e-9)
+                       return_all=True, floor=1e-9, rho_y_by_round=POOLED)
             if not r.related:
                 continue
             best = max(c for _, c in r.all_paths)
@@ -321,7 +325,7 @@ def test_per_query_cost_does_not_blow_up_with_N():
         pairs = list(enumerate_class(g, "full_sibs", limit=60))
         t0 = time.time()
         for a, b in pairs:
-            relate(g, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+            relate(g, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED)
         timings[N] = (time.time() - t0) / len(pairs)
     # a 4x increase in N must not produce anything like a 16x increase per query
     assert timings[1600] < 4 * timings[400]
@@ -375,7 +379,7 @@ def hand_built_mating_chain(n_matings: int):
 def test_sibling_ladder_on_hand_built_pedigrees(n_matings, expected_name):
     """The four sibling classes differ only in N_mu within one mating chain: 1,2,3,4."""
     g, A, B = hand_built_mating_chain(n_matings)
-    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12, rho_y_by_round=POOLED)
     assert r.related
     assert r.signature.mating_chains == ((n_matings, 2),)
     assert r.signature.sum_N_lin == 2
@@ -388,7 +392,7 @@ def test_sibling_ladder_on_hand_built_pedigrees(n_matings, expected_name):
 def test_step_step_sibs_prediction_matches_the_closed_form():
     """Step-step sibs: N_mu = 4, so w = (1/4)[c(4) + 2c(3) + c(2)]."""
     g, A, B = hand_built_mating_chain(4)
-    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12, rho_y_by_round=POOLED)
     w = 0.25 * (RHO_G * RHO_Y ** 3 + 2 * RHO_G * RHO_Y ** 2 + RHO_G * RHO_Y)
     assert r.cov == pytest.approx(V_A * w)
 
@@ -398,16 +402,16 @@ def test_sibling_ladder_is_monotonically_weaker():
     for n in (1, 2, 3, 4):
         g, A, B = hand_built_mating_chain(n)
         covs.append(relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
-                           floor=1e-12).cov)
+                           floor=1e-12, rho_y_by_round=POOLED).cov)
     assert covs[0] > covs[1] > covs[2] > covs[3]
 
 
 def test_relate_matches_brute_force_on_a_small_pedigree():
-    """relate() must agree with exhaustive enumeration where exhaustive is feasible."""
+    """relate(, rho_y_by_round=POOLED) must agree with exhaustive enumeration where exhaustive is feasible."""
     g, A, B = hand_built_mating_chain(3)
     exhaustive = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
-                        floor=1e-12, return_all=True)
-    fast = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+                        floor=1e-12, return_all=True, rho_y_by_round=POOLED)
+    fast = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12, rho_y_by_round=POOLED)
     assert fast.signature.key == exhaustive.signature.key
     assert fast.corr == pytest.approx(max(c for _, c in exhaustive.all_paths))
 
@@ -426,7 +430,7 @@ def test_nmu1_no1_cell_is_excluded():
     """
     g, A, B = hand_built_mating_chain(1)   # A and B are full sibs via parents 0 -- 1
     # parent 0 and child B: a genuine parent-offspring pair inside the same pedigree
-    r = relate(g, 0, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    r = relate(g, 0, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12, rho_y_by_round=POOLED)
     assert r.related
     # must be the lineal answer, not the inflated mating route
     expected = predicted_cov(PathSignature(1, 0, (), "source", "sink"),
@@ -435,7 +439,7 @@ def test_nmu1_no1_cell_is_excluded():
     assert r.name == "parent-offspring"
     # no candidate anywhere in the search may carry that cell
     diag = relate(g, 0, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
-                  floor=1e-12, return_all=True)
+                  floor=1e-12, return_all=True, rho_y_by_round=POOLED)
     for sig, _ in diag.all_paths:
         assert (1, 1) not in sig.mating_chains
 
@@ -454,3 +458,43 @@ def test_excluded_cell_would_have_won_if_admitted():
     # the inflation is (1+rho_g)/(h^2 (1+rho_y)) with h^2 = rho_g/rho_y
     h2 = RHO_G / RHO_Y
     assert spurious / correct == pytest.approx((1 + RHO_G) / (h2 * (1 + RHO_Y)))
+
+
+def test_relate_refuses_multi_round_pedigree_without_a_decision(graph):
+    """D-0014: relate states the ambiguity once, up front, not mid-search."""
+    a, b = next(iter(enumerate_class(graph, "half_sibs", limit=1)))
+    with pytest.raises(ValueError, match="matching rounds"):
+        relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+
+
+def test_relate_accepts_pooled_or_a_mapping(graph):
+    a, b = next(iter(enumerate_class(graph, "half_sibs", limit=1)))
+    pooled = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
+                    rho_y_by_round="pooled")
+    mapped = relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
+                    rho_y_by_round={0: RHO_Y, 1: RHO_Y})
+    assert pooled.related and mapped.related
+    assert pooled.cov == pytest.approx(mapped.cov)
+
+
+def test_monogamous_pedigree_needs_no_decision():
+    """One matching round has no ambiguity, so it must not be made to ask."""
+    g = PedigreeGraph.from_population(_monogamous_pop(N=400, M=40, gens=2))
+    a, b = next(iter(enumerate_class(g, "full_sibs", limit=1)))
+    r = relate(g, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y)
+    assert r.name == "full siblings"
+
+
+def _monogamous_pop(N, M, gens):
+    np.random.seed(9)
+    pop = Population(N=N, M=M, seed=9)
+    pop.assign_sex()
+    pop.add_trait(
+        name="y",
+        effects={"A": GeneticEffect(var_indep=0.5, M=M, M_causal=M, name="A")},
+        var_Eps=0.5,
+    )
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic",
+                   keep_past_generations=gens, n_offspring_dist="poisson")
+    pop.simulate_generations(gens)
+    return pop
