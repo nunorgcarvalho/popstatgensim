@@ -1,7 +1,14 @@
 """Public package interface for popstatgensim."""
 
 from . import estimation, genome, io, pedigree, plotting, simulation, traits, utils
-from .estimation import run_EO_AM, run_HEreg, run_REML
+from .estimation import (
+    AMMeasurements,
+    compare_to_theory,
+    measure_am_quantities,
+    run_EO_AM,
+    run_HEreg,
+    run_REML,
+)
 from .genome import PCAResult
 from .io import (
     align_samples,
@@ -13,7 +20,14 @@ from .io import (
     subset_grm_by_ids,
 )
 from .simulation import Population, PopulationParams, SuperPopulation
-from .traits import FixedEffect, GeneticEffect, NoiseEffect, RandomEffect, Trait
+from .traits import (
+    BaseStandardization,
+    FixedEffect,
+    GeneticEffect,
+    NoiseEffect,
+    RandomEffect,
+    Trait,
+)
 
 __all__ = [
     "Population",
@@ -26,6 +40,10 @@ __all__ = [
     "NoiseEffect",
     "PCAResult",
     "run_EO_AM",
+    "BaseStandardization",
+    "AMMeasurements",
+    "measure_am_quantities",
+    "compare_to_theory",
     "run_HEreg",
     "run_REML",
     "export_GRM_GCTA",

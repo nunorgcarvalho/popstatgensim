@@ -879,3 +879,59 @@ class NoiseEffect(Effect):
                 return np.zeros_like(values)
             raise ValueError('Cannot rescale zero-variance noise component.')
         return values * np.sqrt(self.var / current_var)
+
+def find_variance_pinned_genetic_effects(traits: dict,
+                                         am_trait: str = None) -> list[tuple[str, str, str]]:
+    '''
+    Finds genetic components whose variance is pinned every generation.
+
+    A pinned genetic component has its realized variance rescaled back to `var_indep`
+    in every generation, which destroys the additive-variance inflation that
+    assortative mating is supposed to produce. This is the footgun that silently
+    invalidates the whole equilibrium tier of the `relative_covariance` derivations.
+
+    A `NoiseEffect` defaulting to `force_var=True` is CORRECT and wanted -- the writeup
+    holds V_E fixed -- so only `GeneticEffect` objects are reported here.
+
+    Parameters:
+        traits (dict): Mapping of trait name to Trait object.
+        am_trait (str): If given, only this trait is inspected. Otherwise all traits are.
+
+    Returns:
+        list of (trait_name, effect_name, reason) for each pinned genetic component.
+    '''
+    pinned = []
+    for trait_name, trait in traits.items():
+        if am_trait is not None and trait_name != am_trait:
+            continue
+        for effect_name, effect in getattr(trait, 'effects', {}).items():
+            if not isinstance(effect, GeneticEffect):
+                continue
+            if getattr(effect, 'force_var', False):
+                pinned.append((trait_name, effect_name, 'force_var=True'))
+            elif getattr(effect, '_rescale_to_var_indep', None) is not None:
+                pinned.append((trait_name, effect_name, '_rescale_to_var_indep is set'))
+    return pinned
+
+
+def warn_if_variance_pinned_under_AM(traits: dict, am_trait: str = None):
+    '''
+    Warns if any genetic component is variance-pinned while assortative mating is active.
+
+    See `find_variance_pinned_genetic_effects` for what "pinned" means and why it
+    matters. Emits a single warning naming every offending component.
+    '''
+    pinned = find_variance_pinned_genetic_effects(traits, am_trait=am_trait)
+    if not pinned:
+        return pinned
+    detail = ', '.join(f'{t}.{e} ({why})' for t, e, why in pinned)
+    warnings.warn(
+        'Assortative mating is active, but the following genetic components have their '
+        f'variance pinned every generation: {detail}. The additive variance will be '
+        'rescaled back to `var_indep` in each generation, so V_A will NOT inflate and '
+        'the AM equilibrium results will be invalid. Set force_var=False on genetic '
+        'components under AM (force_var=True on a NoiseEffect is fine and wanted).',
+        UserWarning,
+        stacklevel=3,
+    )
+    return pinned

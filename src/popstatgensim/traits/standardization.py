@@ -1,0 +1,260 @@
+"""Pinned base-generation genotype standardization.
+
+By default a :class:`~popstatgensim.traits.effects.GeneticEffect` refreshes its
+``effects_standardized`` from the *current* generation's genotype standard deviations
+every generation (see ``GeneticEffect.update_G_std``). That is harmless for the
+simulation itself -- realized genetic values are computed from the fixed
+``effects_per_allele`` -- but it means any quantity read off ``effects_standardized``,
+or off a genotype matrix restandardized on the current generation, silently changes
+units from one generation to the next.
+
+Theory that holds allele frequencies fixed (the ``Constant-freq`` assumption of the
+``relative_covariance`` writeup, which standardizes by a fixed ``sqrt(P p (1 - p))``
+taken from the base population) needs the *same* units in every generation. This module
+pins a base generation's standardization so that quantities such as ``V_A^(0)`` and
+``V_A^(eq)`` are directly comparable.
+
+Every quantity returned here carries the standardization it was computed against, so a
+pinned number is never mistaken for a per-generation one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+
+VALID_STD_METHODS = ('observed', 'binomial')
+
+
+@dataclass(frozen=True)
+class BaseStandardization:
+    """A genotype standardization pinned to one (base) generation.
+
+    Attributes:
+        p: Length-``M`` allele frequencies of the base generation.
+        G_std: Length-``M`` genotype standard deviations to divide by. These are
+            *fixed* -- they are not refreshed as the population evolves.
+        P: Ploidy of the genotypes the standardization was built from.
+        t_base: The generation index (``Population.t``) this was pinned at.
+        method: How ``G_std`` was derived -- ``'observed'`` (the base generation's
+            empirical column SDs, matching ``get_G_std_for_effects``) or
+            ``'binomial'`` (``sqrt(P p (1 - p))``, the writeup's literal
+            ``sqrt(2 p (1 - p))`` under Hardy-Weinberg).
+    """
+
+    p: np.ndarray
+    G_std: np.ndarray
+    P: int
+    t_base: int
+    method: str
+
+    @property
+    def M(self) -> int:
+        return int(self.p.shape[0])
+
+    @property
+    def label(self) -> str:
+        """Short human-readable tag naming this standardization."""
+        return f'pinned[{self.method}]@t={self.t_base}'
+
+    @classmethod
+    def from_population(cls, pop, method: str = 'observed',
+                        p_min: float = 0.05) -> 'BaseStandardization':
+        """Pins the standardization of ``pop``'s current generation.
+
+        Parameters:
+            pop: A :class:`~popstatgensim.simulation.population.Population`. Its
+                *current* generation becomes the base generation.
+            method: ``'observed'`` (default) uses the base generation's empirical
+                genotype SDs -- this is what ``GeneticEffect`` used when it first
+                converted standardized effects into per-allele effects, so it
+                reproduces the original ``effects_standardized`` exactly.
+                ``'binomial'`` uses ``sqrt(P p (1 - p))``, the writeup's form.
+            p_min: Allele frequency assumed for variants that are monomorphic in the
+                base generation, so their SD is never zero. Matches the convention in
+                ``effect_sampling.get_G_std_for_effects``.
+        """
+        method = str(method).strip().lower()
+        if method not in VALID_STD_METHODS:
+            raise ValueError(f'`method` must be one of {list(VALID_STD_METHODS)}, got {method!r}.')
+
+        G = np.asarray(pop.G)
+        P = int(pop.P)
+        p = np.asarray(pop.p, dtype=float).copy()
+
+        if method == 'observed':
+            G_std = G.std(axis=0).astype(float)
+        else:
+            G_std = np.sqrt(P * p * (1.0 - p))
+
+        # monomorphic variants would otherwise divide by zero
+        G_std = np.where(G_std == 0, np.sqrt(P * p_min * (1.0 - p_min)), G_std)
+
+        return cls(p=p, G_std=G_std, P=P, t_base=int(pop.t), method=method)
+
+    def _check_M(self, M: int):
+        if M != self.M:
+            raise ValueError(
+                f'Expected {self.M} variants to match this standardization '
+                f'({self.label}), got {M}.'
+            )
+
+    def standardize(self, G: np.ndarray) -> np.ndarray:
+        """Standardizes a genotype matrix against the pinned base generation.
+
+        Centers on the *base* allele frequencies and divides by the *base* SDs, so
+        columns are only mean-0/variance-1 in the base generation itself. Any drift
+        away from that is real signal, not an artifact -- it is exactly what
+        :meth:`allele_freq_drift` reports.
+        """
+        G = np.asarray(G, dtype=float)
+        if G.ndim != 2:
+            raise ValueError('`G` must be a 2D array.')
+        self._check_M(G.shape[1])
+        return (G - self.P * self.p[None, :]) / self.G_std[None, :]
+
+    def to_standardized_effects(self, effects_per_allele: np.ndarray) -> np.ndarray:
+        """Converts fixed per-allele effects into per-standardized-allele effects in pinned units."""
+        effects_per_allele = np.asarray(effects_per_allele, dtype=float)
+        if effects_per_allele.ndim != 1:
+            raise ValueError('`effects_per_allele` must be a 1D array.')
+        self._check_M(effects_per_allele.shape[0])
+        return effects_per_allele * self.G_std
+
+    def allele_freq_drift(self, pop) -> dict:
+        """Reports how far allele frequencies have drifted from the base generation.
+
+        This is a *diagnostic*, not a correction: the ``Constant-freq`` assumption
+        bundles the large-``N_e`` limit, and the intended use is to document that
+        assuming no drift is reasonable at the ``N`` and generation counts in use.
+
+        Returns a dict with the mean/max absolute and relative frequency change, the
+        implied mean/max relative change in each variant's genotype SD (the quantity
+        that actually propagates into ``V_A``), and how many variants have gone
+        monomorphic since the base generation.
+        """
+        p_now = np.asarray(pop.p, dtype=float)
+        self._check_M(p_now.shape[0])
+
+        d_abs = np.abs(p_now - self.p)
+        # relative change guarded against base frequencies of exactly 0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            d_rel = np.where(self.p > 0, d_abs / self.p, np.nan)
+
+        sd_now = np.sqrt(self.P * p_now * (1.0 - p_now))
+        sd_base = np.sqrt(self.P * self.p * (1.0 - self.p))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            sd_rel = np.where(sd_base > 0, np.abs(sd_now - sd_base) / sd_base, np.nan)
+
+        return {
+            'standardization': self.label,
+            't_base': self.t_base,
+            't_now': int(pop.t),
+            'generations_elapsed': int(pop.t) - self.t_base,
+            'mean_abs_dp': float(d_abs.mean()),
+            'max_abs_dp': float(d_abs.max()),
+            'mean_rel_dp': float(np.nanmean(d_rel)),
+            'max_rel_dp': float(np.nanmax(d_rel)),
+            'mean_rel_dsd': float(np.nanmean(sd_rel)),
+            'max_rel_dsd': float(np.nanmax(sd_rel)),
+            'n_lost': int(np.sum((p_now == 0) | (p_now == 1))),
+            'n_lost_base': int(np.sum((self.p == 0) | (self.p == 1))),
+            'M': self.M,
+        }
+
+
+def get_genetic_effect(trait, component: str = 'A'):
+    """Returns the :class:`GeneticEffect` named ``component`` from ``trait``.
+
+    Raises a clear error rather than a ``KeyError`` when the trait has no such
+    genetic component.
+    """
+    from .effects import GeneticEffect
+
+    effect = trait.effects.get(component) if hasattr(trait, 'effects') else None
+    if effect is None:
+        raise ValueError(
+            f"Trait '{getattr(trait, 'name', trait)}' has no effect named '{component}'."
+        )
+    if not isinstance(effect, GeneticEffect):
+        raise ValueError(
+            f"Effect '{component}' of trait '{getattr(trait, 'name', trait)}' is a "
+            f'{type(effect).__name__}, not a GeneticEffect.'
+        )
+    return effect
+
+
+def var_A_pinned(pop, trait: str, standardization: BaseStandardization,
+                 component: str = 'A') -> float:
+    """Additive variance recomputed from genotypes in pinned base-generation units.
+
+    Evaluates ``Var[X_pinned @ beta_pinned]``, i.e. the additive variance the current
+    genotypes and the fixed per-allele effects imply. Because ``effects_per_allele`` is
+    held fixed across generations this is already in stable units; the pinned
+    standardization makes those units explicit rather than changing the number.
+
+    **This is a cross-check, not the headline V_A.** It recomputes from ``pop.G`` and so
+    ignores any rescaling applied to the *realized* component -- in particular a
+    ``GeneticEffect`` with ``force_var=True`` rescales ``y_['A']`` back to ``var_indep``
+    every generation, which this function does not see. A material gap between this and
+    :func:`var_A_observed` is therefore a symptom worth reading, usually that footgun.
+    The quantity the writeup's theory predicts is the realized one,
+    :func:`var_A_observed`.
+    """
+    trait_obj = pop.traits[trait]
+    effect = get_genetic_effect(trait_obj, component=component)
+    if effect.effects_per_allele is None:
+        raise ValueError(f"Effect '{component}' has no per-allele effects stored.")
+    X = standardization.standardize(pop.G)
+    beta_std = standardization.to_standardized_effects(effect.effects_per_allele)
+    return float(np.var(X @ beta_std))
+
+
+def var_A_observed(pop, trait: str, component: str = 'A') -> float:
+    """Additive variance of the realized genetic values in the current generation.
+
+    ``Var[y_['A']]`` -- what the simulation actually realized and what drives both the
+    phenotype and the mating, so this is the ``V_A`` the writeup's equilibrium formulas
+    predict. Compare against :func:`var_A_pinned` to detect a ``force_var`` rescale.
+    """
+    trait_obj = pop.traits[trait]
+    if component not in trait_obj.y_:
+        raise ValueError(
+            f"Trait '{trait}' has no realized component '{component}'."
+        )
+    return float(np.var(np.asarray(trait_obj.y_[component], dtype=float)))
+
+
+def var_A_from_effects(pop, trait: str,
+                       standardization: Optional[BaseStandardization] = None,
+                       component: str = 'A') -> float:
+    """Additive variance implied by the effect sizes alone: ``sum_k beta_k^2``.
+
+    This is the "independent variants" proxy for ``V_A`` -- exact only when the causal
+    standardized genotypes are uncorrelated and have unit variance, which is true in
+    the base generation but not after assortative mating has induced correlations
+    between causal variants.
+
+    It is the quantity most exposed to the standardization drift this module exists to
+    fix. With ``standardization=None`` it reads the effect's own
+    ``effects_standardized``, which ``GeneticEffect.update_G_std()`` recomputes from the
+    **current** generation's genotype SDs -- so it silently changes units every
+    generation. With a pinned ``standardization`` it is held in fixed base-generation
+    units and reproduces the base value exactly.
+
+    Compare the two to see how much of an apparent change in ``V_A`` is unit drift
+    rather than real inflation. Neither is the truth: that is
+    :func:`var_A_pinned` / :func:`var_A_observed`.
+    """
+    effect = get_genetic_effect(pop.traits[trait], component=component)
+    if standardization is None:
+        if effect.effects_standardized is None:
+            raise ValueError(f"Effect '{component}' has no standardized effects stored.")
+        beta_std = np.asarray(effect.effects_standardized, dtype=float)
+    else:
+        if effect.effects_per_allele is None:
+            raise ValueError(f"Effect '{component}' has no per-allele effects stored.")
+        beta_std = standardization.to_standardized_effects(effect.effects_per_allele)
+    return float(np.sum(beta_std ** 2))

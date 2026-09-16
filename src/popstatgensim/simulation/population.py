@@ -23,6 +23,7 @@ from ..pedigree.pedigree import Pedigree
 from ..plotting import common as common_plotting
 from ..plotting import genome as genome_plotting
 from ..traits import effect_sampling as trait_sampling
+from ..traits.effects import warn_if_variance_pinned_under_AM
 from ..traits.trait import Trait
 from ..utils import matrix_metrics as utils_matrix_metrics
 from ..utils import misc as misc_utils
@@ -1386,6 +1387,11 @@ class Population:
         uses_assortative_mating = (
             sim_params.AM_trait is not None and not np.isclose(sim_params.AM_r, 0.0)
         )
+        if uses_assortative_mating:
+            # A variance-pinned genetic component is rescaled back to `var_indep` every
+            # generation, which silently cancels the V_A inflation AM is meant to produce.
+            am_trait_name = sim_params.AM_trait if isinstance(sim_params.AM_trait, str) else None
+            warn_if_variance_pinned_under_AM(self.traits, am_trait=am_trait_name)
         if generations > 1 and not trait_updates and uses_assortative_mating:
             raise ValueError(
                 'Assortative mating can only be simulated if traits are updated for each generation. '
