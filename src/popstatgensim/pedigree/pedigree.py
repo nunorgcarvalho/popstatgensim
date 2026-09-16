@@ -168,6 +168,15 @@ class Pedigree:
     def construct_paths(self):
         '''
         Constructs a dictionary with the relationship paths between every related individual in the current population. Pedigree object must have par_idx and par_Ped attributes. See __init__(). For individual i and j, the shortest relationship path between the 4 pairs of parents of i and j is used, and then extended by one meiosis up and down to get the relationship path between i and j. This can erase inbreeding information in the current generation. Only entries i>j are explicitly computed, since the reverse relationships are automatically filled in.
+        
+
+        .. deprecated::
+            Superseded by ``pedigree.graph.PedigreeGraph`` + ``pedigree.relate.relate``
+            (D-0007). This materializes a dict over all related pairs -- ~10^9 entries
+            at N = 10,000 over 4 generations -- and its signed-meiosis ``PedPath``
+            encoding has no mating edge, so step-siblings, parent--parent and
+            parents-of-a-married-couple are recorded as UNRELATED. Use the graph layer,
+            which stores only local structure and computes relationships on demand.
         '''
         # checks to ensure par_idx and par_Ped are in the object
         if self.par_idx is None or self.par_Ped is None:

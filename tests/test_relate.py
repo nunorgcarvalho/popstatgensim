@@ -325,3 +325,88 @@ def test_per_query_cost_does_not_blow_up_with_N():
         timings[N] = (time.time() - t0) / len(pairs)
     # a 4x increase in N must not produce anything like a 16x increase per query
     assert timings[1600] < 4 * timings[400]
+
+
+# ---------------------------------------------------------------------------
+# Hand-built pedigrees: the classes too rare to sample at feasible N
+# ---------------------------------------------------------------------------
+
+def hand_built_mating_chain(n_matings: int):
+    """A pedigree whose two probands are joined by exactly ``n_matings`` matings.
+
+    Builds a mate chain P0 -- P1 -- ... -- Pn, gives the FIRST mating a child A and the
+    LAST a child B, so A and B are joined by one mating chain of length ``n_matings``
+    and by no blood path at all. n_matings = 1/2/3/4 gives full / half / step /
+    step-step siblings respectively.
+
+    Step-step sibs need four matings on one chain and are effectively unsampleable from
+    a random population at feasible N -- the task anticipates this and asks that their
+    signature and prediction be checked on a hand-built pedigree instead.
+    """
+    n_parents = n_matings + 1
+    N = n_parents + 2  # the chain, plus the two probands
+    A, B = n_parents, n_parents + 1
+
+    parents = np.full((N, 2), -1, dtype=np.int32)
+    parents[A] = [0, 1]                            # child of the first mating
+    parents[B] = [n_parents - 2, n_parents - 1]    # child of the last mating
+
+    mate_edges = np.array([[k, k + 1] for k in range(n_matings)], dtype=np.int32)
+    generation = np.zeros(N, dtype=np.int32)
+    generation[[A, B]] = 1
+
+    mate_pair_id = np.full(N, -1, dtype=np.int32)
+    mate_pair_id[A] = 0
+    mate_pair_id[B] = n_matings - 1
+
+    return PedigreeGraph(
+        N=N, parents=parents, generation=generation, mate_edges=mate_edges,
+        mate_round_id=np.zeros(n_matings, dtype=np.int32),
+        mate_pair_id=mate_pair_id,
+    ), A, B
+
+
+@pytest.mark.parametrize("n_matings,expected_name", [
+    (1, "full siblings"),
+    (2, "half siblings"),
+    (3, "step siblings"),
+    (4, "step-step siblings"),
+])
+def test_sibling_ladder_on_hand_built_pedigrees(n_matings, expected_name):
+    """The four sibling classes differ only in N_mu within one mating chain: 1,2,3,4."""
+    g, A, B = hand_built_mating_chain(n_matings)
+    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    assert r.related
+    assert r.signature.mating_chains == ((n_matings, 2),)
+    assert r.signature.sum_N_lin == 2
+    assert r.name == expected_name
+    expected = predicted_cov(PathSignature(2, 2, ((n_matings, 2),)),
+                             V_A, RHO_Y, RHO_G, phenotypic=True)
+    assert r.cov == pytest.approx(expected)
+
+
+def test_step_step_sibs_prediction_matches_the_closed_form():
+    """Step-step sibs: N_mu = 4, so w = (1/4)[c(4) + 2c(3) + c(2)]."""
+    g, A, B = hand_built_mating_chain(4)
+    r = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    w = 0.25 * (RHO_G * RHO_Y ** 3 + 2 * RHO_G * RHO_Y ** 2 + RHO_G * RHO_Y)
+    assert r.cov == pytest.approx(V_A * w)
+
+
+def test_sibling_ladder_is_monotonically_weaker():
+    covs = []
+    for n in (1, 2, 3, 4):
+        g, A, B = hand_built_mating_chain(n)
+        covs.append(relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
+                           floor=1e-12).cov)
+    assert covs[0] > covs[1] > covs[2] > covs[3]
+
+
+def test_relate_matches_brute_force_on_a_small_pedigree():
+    """relate() must agree with exhaustive enumeration where exhaustive is feasible."""
+    g, A, B = hand_built_mating_chain(3)
+    exhaustive = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
+                        floor=1e-12, return_all=True)
+    fast = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    assert fast.signature.key == exhaustive.signature.key
+    assert fast.corr == pytest.approx(max(c for _, c in exhaustive.all_paths))

@@ -1,3 +1,22 @@
+"""Legacy relationship-type lookup.
+
+.. deprecated::
+    Superseded by the signature-based naming in ``pedigree.relate``
+    (``KNOWN_SIGNATURES`` plus ``PathSignature.systematic_name()``), per D-0007.
+
+    Two reasons, not one. The obvious one is that ``full_half`` was inferred from
+    ``up_last in {1,2}`` vs ``3`` -- a proxy that had never been exercised, because
+    monogamy makes every sibling connection run through both parents, so ``up_last``
+    was always 3 and the ``half`` branch was dead code. That proxy is in fact sound
+    in principle (step code 3 = both parents = full; 1 or 2 = one parent = half).
+
+    The deeper reason is that the encoding cannot represent a mating STEP at all, so
+    step siblings and step-step siblings have no representation here regardless of
+    whether the full/half proxy works. The replacement distinguishes the four
+    sibling classes by ``N_mu`` within a single mating chain (1, 2, 3, 4), which is
+    the writeup's own vocabulary.
+"""
+
 # Note: a path from A-->B is classified as the relationship of B with respect to A. So, e.g., if A-->B is [+1], then that path is classified as 'parent', because B is the parent of A.
 # within each attribute, the keys are:
 # - sigs: dictionary of signature constraints to match. If value is a single integer, it is treated as an exact match. If value is a list, it is treated as a set of possible values. If value is a tuple of length 2, it is treated as a range (inclusive). A missing signature attribute means it is not constrained.
