@@ -634,3 +634,44 @@ def test_measurements_carry_a_kk():
     m = measure_am_quantities(pop, "y", standardization=std)
     assert m.sum_beta2_a is not None
     assert m.mean_a_kk is not None
+
+
+def test_signed_and_unsigned_drift_are_different_quantities():
+    """rel_dhet is signed heterozygosity loss; mean_rel_dsd is unsigned magnitude.
+
+    They scale differently -- |dp| accumulates like sqrt(t/(2N)) while E[2p(1-p)]
+    declines like t/(2N) -- so regressing the unsigned magnitude against the signed
+    F = t/(2N) prediction gives a confident wrong slope. Both are reported; neither
+    substitutes for the other.
+    """
+    pop = build_pop(N=2000, M=300, seed=60)
+    std = BaseStandardization.from_population(pop)
+
+    d0 = std.allele_freq_drift(pop)
+    assert d0["rel_dhet"] == pytest.approx(0.0)
+    assert d0["mean_rel_dsd"] == pytest.approx(0.0)
+    assert d0["mean_het_now"] == pytest.approx(d0["mean_het_base"])
+
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+    pop.simulate_generations(12)
+    d = std.allele_freq_drift(pop)
+
+    # signed: heterozygosity is LOST under drift, so this is negative and small
+    assert d["rel_dhet"] < 0
+    assert abs(d["rel_dhet"]) < 0.05
+    # unsigned: strictly positive magnitude, and materially larger than |signed|
+    assert d["mean_rel_dsd"] > 0
+    assert d["mean_rel_dsd"] > abs(d["rel_dhet"])
+    assert d["mean_het_base"] > 0
+
+
+def test_unsigned_drift_grows_monotonically_while_signed_need_not():
+    """The unsigned magnitude accumulates; the signed quantity is a noisy random walk."""
+    pop = build_pop(N=2000, M=300, seed=61)
+    std = BaseStandardization.from_population(pop)
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+    unsigned = []
+    for _ in range(4):
+        pop.simulate_generations(5)
+        unsigned.append(std.allele_freq_drift(pop)["mean_rel_dsd"])
+    assert unsigned == sorted(unsigned), "|dSD| must accumulate monotonically"

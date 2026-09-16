@@ -134,6 +134,18 @@ class BaseStandardization:
         implied mean/max relative change in each variant's genotype SD (the quantity
         that actually propagates into ``V_A``), and how many variants have gone
         monomorphic since the base generation.
+
+        Two different quantities are reported and they are NOT interchangeable:
+
+        * ``mean_rel_dsd`` is an unsigned mean of ``|dSD|`` -- drift **magnitude**.
+        * ``rel_dhet`` is the **signed** relative change in mean heterozygosity,
+          ``mean(2 p_t (1-p_t)) / mean(2 p_0 (1-p_0)) - 1``.
+
+        Use ``rel_dhet`` for anything testing the neutral prediction
+        ``E[2 p_t (1-p_t)] = 2 p_0 (1-p_0) (1 - F)`` with ``F = t / (2N)``. The two
+        scale differently -- ``|dp|`` accumulates like ``sqrt(t/(2N))`` while
+        heterozygosity declines like ``t/(2N)`` -- so fitting the unsigned magnitude
+        against the signed prediction gives a confident wrong slope.
         """
         p_now = np.asarray(pop.p, dtype=float)
         self._check_M(p_now.shape[0])
@@ -148,7 +160,20 @@ class BaseStandardization:
         with np.errstate(divide='ignore', invalid='ignore'):
             sd_rel = np.where(sd_base > 0, np.abs(sd_now - sd_base) / sd_base, np.nan)
 
+        # SIGNED heterozygosity change. `mean_rel_dsd` above is an unsigned mean of
+        # |dSD|, i.e. drift MAGNITUDE, and the two scale differently: |dp| accumulates
+        # like sqrt(t/(2N)) while E[2p(1-p)] declines like t/(2N). Any test of the
+        # neutral prediction E[2p_t(1-p_t)] = 2p_0(1-p_0)(1-F) with F = t/(2N) needs
+        # this one -- regressing an unsigned magnitude against a signed prediction
+        # yields a confident wrong slope.
+        het_now = float(np.mean(2.0 * p_now * (1.0 - p_now)))
+        het_base = float(np.mean(2.0 * self.p * (1.0 - self.p)))
+        rel_het = (het_now / het_base - 1.0) if het_base > 0 else float('nan')
+
         return {
+            'rel_dhet': rel_het,
+            'mean_het_now': het_now,
+            'mean_het_base': het_base,
             'standardization': self.label,
             't_base': self.t_base,
             't_now': int(pop.t),
