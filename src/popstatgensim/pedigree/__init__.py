@@ -25,7 +25,7 @@ from .paths import (
     predicted_cov,
     proband_correction,
 )
-from .pedigree import PedKey2, PedPath, PathSig, Pedigree, RelObj
+from .pedigree import PedKey2, Pedigree  # unpickling shim for the removed layer
 from .relate import (
     KNOWN_SIGNATURES,
     VALID_CLASS_SPECS,
@@ -35,10 +35,8 @@ from .relate import (
     signature_name,
 )
 from .relations import get_relation_matrix, initialize_relations
-from .relative_types import REL_TYPES
 
 __all__ = [
-    "REL_TYPES",
     "PedigreeGraph",
     "PathSignature",
     "LinealChain",
@@ -54,10 +52,7 @@ __all__ = [
     "signature_name",
     "KNOWN_SIGNATURES",
     "VALID_CLASS_SPECS",
-    "PedPath",
     "PedKey2",
-    "PathSig",
-    "RelObj",
     "Pedigree",
     "initialize_relations",
     "get_relation_matrix",

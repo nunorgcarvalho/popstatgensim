@@ -810,7 +810,11 @@ class Population:
         generation rather than materializing every pairwise path. Use it with
         `pedigree.relate()` and `pedigree.enumerate_class()`.
         '''
-        if self._pedigree_graph is None:
+        # getattr, not attribute access: a Population pickled BEFORE the PedPath removal
+        # has no `_pedigree_graph` in its __dict__, and unpickling does not call
+        # __init__, so a bare `self._pedigree_graph` raises AttributeError on every
+        # restored bundle. Found by the round-trip test rather than by reasoning.
+        if getattr(self, '_pedigree_graph', None) is None:
             from ..pedigree.graph import PedigreeGraph
             self._pedigree_graph = PedigreeGraph.from_population(self)
         return self._pedigree_graph

@@ -498,3 +498,65 @@ def _monogamous_pop(N, M, gens):
                    keep_past_generations=gens, n_offspring_dist="poisson")
     pop.simulate_generations(gens)
     return pop
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility of the PedPath removal
+# ---------------------------------------------------------------------------
+
+def test_pedigree_shim_cannot_be_constructed_but_can_be_unpickled():
+    """The removed layer's class survives only so old pickles load.
+
+    Population.__init__ used to assign `self.ped = Pedigree(self.N)` for EVERY
+    population, tracked or not, so every pre-removal pickle embeds this class and
+    deleting it outright would make existing scratch bundles unloadable.
+    """
+    import pickle
+    from popstatgensim.pedigree.pedigree import Pedigree
+
+    with pytest.raises(TypeError, match="removed"):
+        Pedigree(10)
+
+    # unpickling does not call __init__, which is what makes the shim work
+    obj = Pedigree.__new__(Pedigree)
+    obj.__dict__["paths"] = {(0, 1): (1, -1)}
+    restored = pickle.loads(pickle.dumps(obj))
+    assert restored.__dict__["paths"] == {(0, 1): (1, -1)}
+    assert "removed layer" in repr(restored)
+
+
+def test_population_without_pedigree_graph_attribute_still_works():
+    """A Population restored from a pre-removal pickle has no `_pedigree_graph`.
+
+    Unpickling does not call __init__, so the attribute is simply absent and a bare
+    `self._pedigree_graph` would raise AttributeError on every restored bundle. The
+    property must tolerate that. Caught by the round-trip check, not by reasoning.
+    """
+    pop = build_pop(N=300, M=40, gens=2)
+    del pop.__dict__["_pedigree_graph"]          # simulate the pre-removal shape
+    assert "_pedigree_graph" not in pop.__dict__
+    g = pop.pedigree_graph                        # must not raise
+    assert g.N > 0
+    assert pop.pedigree_graph is g                # and caches thereafter
+
+
+def test_new_populations_carry_no_pedigree_object():
+    """Nothing builds a Pedigree any more; pickles get smaller, not larger."""
+    pop = build_pop(N=200, M=40, gens=1)
+    assert not hasattr(pop, "ped")
+
+
+def test_pedigree_graph_is_lazy_and_invalidated_on_new_generations():
+    pop = build_pop(N=300, M=40, gens=1)
+    assert pop.__dict__["_pedigree_graph"] is None      # not built until asked for
+    first = pop.pedigree_graph
+    assert pop.pedigree_graph is first                  # cached
+    pop.simulate_generations(1)
+    assert pop.__dict__["_pedigree_graph"] is None      # staled by the new generation
+    rebuilt = pop.pedigree_graph
+    assert rebuilt is not first                          # and rebuilt, not reused
+    # N is capped by keep_past_generations, so it does NOT grow without bound -- the
+    # graph spans only the retained generations, which is what makes dropping old ones
+    # coherent (D-0007): a path through a dropped generation is simply unreachable.
+    assert rebuilt.N == first.N
+    assert not np.array_equal(rebuilt.parents, first.parents)
