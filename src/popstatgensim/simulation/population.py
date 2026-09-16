@@ -19,7 +19,6 @@ from ..genome import pca as genome_pca
 from ..genome import structure as genome_structure
 from ..pedigree import ibd as pedigree_ibd
 from ..pedigree import relations as pedigree_relations
-from ..pedigree.pedigree import Pedigree
 from ..plotting import common as common_plotting
 from ..plotting import genome as genome_plotting
 from ..traits import effect_sampling as trait_sampling
@@ -165,7 +164,7 @@ class Population:
         self._update_obj(H=H, Haplos=Haplos, update_past=False)
         self.assign_sex() # assigns sex (F:0 / M:1)
         self.relations = pedigree_relations.initialize_relations(self.N)
-        self.ped = Pedigree(self.N)
+        self._pedigree_graph = None  # built on demand from local structure (D-0007)
 
         # defines metrics
         self.metric = {}
@@ -741,6 +740,7 @@ class Population:
             self._DGRM_cache = {}
             self.p = genome_frequencies.compute_freqs(self.G, self.P)
             self.X = None
+            self._pedigree_graph = None
         if Haplos is not None:
             self.Haplos = Haplos
         elif not self.track_haplotypes:
@@ -788,14 +788,32 @@ class Population:
 
     def _update_pedigree(self):
         '''
-        Updates the pedigree information in the population object for a new generation.
+        Invalidates the cached pedigree graph after a new generation.
+
+        This used to build an all-pairs path dictionary via `Pedigree.construct_paths()`,
+        which cost ~35-64x the rest of a simulation step and grew toward `O(N^2)`. Under
+        D-0007 the pedigree stores only local structure -- `parents`, `offspring`,
+        `mates`, `generation`, all of which already live in `relations` -- and
+        relationships are computed on demand by `pedigree.relate()`. So there is nothing
+        to construct here; the generation change simply stales the cached graph.
         '''
         if self.keep_past_generations < 1:
             raise Exception('Must keep at least 1 past generation to track pedigree.')
-        # makes new Pedigree object from scratch, and adds parent infices and Pedigree pointer
-        self.ped = Pedigree(self.N, par_idx=self.relations['parents'], par_Ped=self.past[1].ped)
-        # fills out the relationship matrix
-        self.ped.construct_paths()
+        self._pedigree_graph = None
+
+    @property
+    def pedigree_graph(self):
+        '''
+        The population's `PedigreeGraph`, built on demand and cached.
+
+        Built from the retained generations' local structure, so it costs `O(N)` per
+        generation rather than materializing every pairwise path. Use it with
+        `pedigree.relate()` and `pedigree.enumerate_class()`.
+        '''
+        if self._pedigree_graph is None:
+            from ..pedigree.graph import PedigreeGraph
+            self._pedigree_graph = PedigreeGraph.from_population(self)
+        return self._pedigree_graph
 
     def store_neighbor_matrix(self, LDwindow: float = None) -> sparse.coo_matrix:
         '''
@@ -988,16 +1006,9 @@ class Population:
         relations_new['parents'] = parents_new
         new_pop.relations = relations_new
 
-        if (self.track_pedigree and keep_past_generations > 0
-                and new_pop.past[1] is not None and np.any(parents_new >= 0)):
-            new_pop.ped = Pedigree(
-                new_pop.N,
-                par_idx=relations_new['parents'],
-                par_Ped=new_pop.past[1].ped,
-            )
-            new_pop.ped.construct_paths()
-        else:
-            new_pop.ped = Pedigree(new_pop.N)
+        # Nothing to rebuild: the pedigree graph is derived on demand from the subset's
+        # own relations, so it is simply absent until asked for.
+        new_pop._pedigree_graph = None
 
         new_pop.traits = {}
         for name, trait in self.traits.items():
@@ -2085,7 +2096,7 @@ class Population:
 
     def flatten_generations(self, generations: int = 1) -> 'Population':
         '''
-        Combines the current generation with the specified number of past generations into a new single population object that is returned. Importantly, it updates the relationship and Pedigree matrices to reflect the relationships in the combined generations.
+        Combines the current generation with the specified number of past generations into a new single population object that is returned. Importantly, it updates the relationship matrices to reflect the relationships in the combined generations. The combined population's pedigree graph is derived on demand from those relations.
         Parameters:
             generations (int): Number of past generations to include in the new population object. Default is 1, meaning only the current and the previous generation are combined.
         '''
@@ -2150,55 +2161,13 @@ class Population:
             gen_parents[valid_mask] += Ns_cumsum[gen + 1]
             new_pop.relations['parents'][i_start:i_end, :] = gen_parents
 
-        # creates accurate Pedigree object for combined population
+        # The all-pairs cross-generation path reconstruction that used to live here is
+        # gone with the PedPath layer: it rebuilt every pairwise relationship between
+        # every pair of generations, which is the O(N^2) cost D-0007 removes. The
+        # combined population's pedigree graph is derived on demand from its own
+        # `relations`, which the block below fills in.
+        new_pop._pedigree_graph = None
 
-        # starts by filling in diagonal blocks
-        for gen in range(generations + 1):
-            # copies over each generation's Pedigree paths
-            for key, value in pops[gen].ped.paths.items():
-                # need to shift indices based on generation
-                key = (key[0] + Ns_cumsum[gen], key[1] + Ns_cumsum[gen])
-                new_pop.ped.paths[key] = new_pop.ped.intern_path(value)
-        # fills in off-diagonal blocks, by going through each adjacent diagonal at a time
-        for gap in range(1, generations+1):
-            for start_gen in range(generations+1 - gap):
-                end_gen = start_gen + gap
-                # gets nested list of ancestors at each generation for each individual in the younger generation
-                ancestors = self.get_ancestors(base_gen=start_gen, end_gen=end_gen)
-                # loops through pairs of individuals in start_gen and end_gen
-                for i in range(Ns[start_gen]): # individual in younger generation
-                    i_gen_ancs = ancestors[i][gap - 1] # ancestors of individual i at generation end_gen (generation of j)
-                    for j in range(Ns[end_gen]): # individual in older generation
-                        keys = ( (i_ancestor, j) for i_ancestor in i_gen_ancs ) # prepares keys for get_closest_path
-                        # determines the closest path between i and j through i's ancestors
-                        closest_anc_path, closest_anc_path_keys = new_pop.ped.get_closest_path(pops[end_gen].ped.paths, keys)
-                        if closest_anc_path is None:
-                            continue # no relationship, don't store anything
-                        else:
-                            closest_anc_path = new_pop.ped.intern_path(closest_anc_path)
-                        
-                        # first [0] extracts (arbitrarily) the first chain with the closest path
-                        # the second [0] extracts the ID of i's ancestor for this chain
-                        i_gen_closest = closest_anc_path_keys[0][0]
-                        # converts i's ancestor ID (in end_gen indices) to index from i_gen_ancs
-                        i_gen_closest_k = np.where(np.isin(i_gen_ancs, i_gen_closest))[0][0]
-                        # converts this index to an array of bits, which informs whether a maternal or paternal meiosis happens as one goes up i's lineage to get to their closest ancestor to j
-                        i_gen_closest_bits = np.array(misc_utils.to_bits(i_gen_closest_k, gap))
-                        up_sexes = tuple( i_gen_closest_bits + 1 ) # converts to sex-informed path steps
-
-                        # takes path of i's ancestor to j and extends it by the specified meioses
-                        path_ij = new_pop.ped.extend_path(closest_anc_path, ups = up_sexes) # already interned
-                        # gets reverse path
-                        path_ji = new_pop.ped.reverse_path(path_ij)
-
-                        # gets keys of each for new_pop's paths
-                        key_ij = (i + Ns_cumsum[start_gen], j + Ns_cumsum[end_gen])
-                        key_ji = (j + Ns_cumsum[end_gen], i + Ns_cumsum[start_gen])
-
-                        # adds to paths
-                        new_pop.ped.paths[key_ij] = path_ij
-                        new_pop.ped.paths[key_ji] = path_ji
-            
         # actually sets relations
         new_pop.relations['full_sibs'] = full_sibs
         new_pop.relations['spouses'] = spouses

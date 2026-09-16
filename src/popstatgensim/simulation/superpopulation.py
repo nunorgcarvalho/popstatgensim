@@ -11,7 +11,6 @@ import numpy as np
 from ..genome import frequencies as genome_frequencies
 from ..genome import pca as genome_pca
 from ..genome import structure as genome_structure
-from ..pedigree.pedigree import Pedigree
 from ..pedigree import relations as pedigree_relations
 from ..plotting import genome as genome_plotting
 from ..traits.effects import FixedEffect, GeneticEffect, NoiseEffect
@@ -372,9 +371,8 @@ class SuperPopulation:
         new_pop.relations = relations
 
         if joined_prev is not None and track_pedigree:
-            new_pop.ped = Pedigree(new_pop.N, par_idx=relations['parents'],
-                                   par_Ped=joined_prev.ped)
-            new_pop.ped.construct_paths()
+            # pedigree relationships are computed on demand from local structure
+            new_pop._pedigree_graph = None
 
         # adds Trait objects by concatenating them, assumes the first population has all traits
         for name in gen_pops[0].traits.keys():
