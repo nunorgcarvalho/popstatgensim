@@ -1,4 +1,4 @@
-"""Tests for the local pedigree graph, on-demand relate(, rho_y_by_round=POOLED), and class enumeration."""
+"""Tests for the local pedigree graph, on-demand relate(), and class enumeration."""
 
 import numpy as np
 import pytest
@@ -15,7 +15,7 @@ from popstatgensim.pedigree.relate import (
 
 RHO_Y, RHO_G, V_A, V_Y = 0.50, 0.28, 0.68, 1.18
 # D-0014: these fixtures use q2 = 0.8, i.e. two matching rounds, so every
-# relate(, rho_y_by_round=POOLED) call must state how multi-round chains are scored. "pooled" is the
+# relate() call must state how multi-round chains are scored. "pooled" is the
 # writeup's literal form and is what these structural tests want.
 POOLED = "pooled"
 
@@ -196,7 +196,7 @@ def test_relate_names_the_named_classes(graph, spec, expected_name):
 
     Scanning rather than taking the first pair is deliberate: a pair enumerated as step
     sibs may ALSO be joined by a shorter, stronger path -- two people who share a mate
-    are co-mates, which dominates the step-sib path. relate(, rho_y_by_round=POOLED) reporting the dominant
+    are co-mates, which dominates the step-sib path. relate() reporting the dominant
     relationship there is correct, not a misclassification.
     """
     found = [relate(graph, a, b, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, rho_y_by_round=POOLED).name
@@ -293,13 +293,13 @@ def test_rho_y_by_round_changes_the_prediction_only_when_supplied(graph):
 
 
 # ---------------------------------------------------------------------------
-# Exactness: relate(, rho_y_by_round=POOLED) vs exhaustive enumeration
+# Exactness: relate() vs exhaustive enumeration
 # ---------------------------------------------------------------------------
 
 def test_dominant_path_equals_the_best_of_all_candidates(graph):
     """The first complete path popped must be the true maximum over all candidates.
 
-    This is the acceptance criterion that relate(, rho_y_by_round=POOLED) agrees with exhaustive search: with
+    This is the acceptance criterion that relate() agrees with exhaustive search: with
     return_all=True every candidate above the floor is listed, so the dominant one can
     be checked against the whole set rather than trusted.
     """
@@ -407,7 +407,7 @@ def test_sibling_ladder_is_monotonically_weaker():
 
 
 def test_relate_matches_brute_force_on_a_small_pedigree():
-    """relate(, rho_y_by_round=POOLED) must agree with exhaustive enumeration where exhaustive is feasible."""
+    """relate() must agree with exhaustive enumeration where exhaustive is feasible."""
     g, A, B = hand_built_mating_chain(3)
     exhaustive = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
                         floor=1e-12, return_all=True, rho_y_by_round=POOLED)
