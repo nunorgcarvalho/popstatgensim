@@ -258,3 +258,39 @@ def var_A_from_effects(pop, trait: str,
             raise ValueError(f"Effect '{component}' has no per-allele effects stored.")
         beta_std = standardization.to_standardized_effects(effect.effects_per_allele)
     return float(np.sum(beta_std ** 2))
+
+
+def effective_n_variants(pop, trait: str,
+                         standardization: Optional[BaseStandardization] = None,
+                         component: str = 'A') -> dict:
+    """Effective number of variants ``M_e`` -- writeup ``\\eqref{eq:Me-def}``.
+
+    ``M_e := (sum_k beta_k^2)^2 / sum_k beta_k^4``, normalized so that ``M_e = M`` when
+    every variant has the same effect size. It controls the size of the neglected term
+    in ``\\eqref{eq:VA-eq}``, so it is what turns that approximation into a testable
+    prediction rather than a tolerance check.
+
+    ``M_e`` is invariant to a global rescaling of the effects but NOT to the
+    per-variant rescaling that standardization drift applies, so pass the pinned
+    ``standardization`` to keep it stable across generations.
+
+    Returns a dict with ``M_e``, ``sum_beta2``, ``sum_beta4`` and the standardization
+    label used.
+    """
+    effect = get_genetic_effect(pop.traits[trait], component=component)
+    if standardization is None:
+        if effect.effects_standardized is None:
+            raise ValueError(f"Effect '{component}' has no standardized effects stored.")
+        beta = np.asarray(effect.effects_standardized, dtype=float)
+        label = f'current@t={int(pop.t)}'
+    else:
+        if effect.effects_per_allele is None:
+            raise ValueError(f"Effect '{component}' has no per-allele effects stored.")
+        beta = standardization.to_standardized_effects(effect.effects_per_allele)
+        label = standardization.label
+
+    sum_b2 = float(np.sum(beta ** 2))
+    sum_b4 = float(np.sum(beta ** 4))
+    M_e = float(sum_b2 ** 2 / sum_b4) if sum_b4 > 0 else float('nan')
+    return {'M_e': M_e, 'sum_beta2': sum_b2, 'sum_beta4': sum_b4,
+            'standardization': label, 'M': int(beta.shape[0])}

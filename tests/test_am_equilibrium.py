@@ -16,9 +16,11 @@ from popstatgensim.estimation import (
     predict_rho_g_eq,
     predict_seg_var,
     predict_VA_eq,
+    predict_VA_eq_corrected,
 )
 from popstatgensim.traits import (
     BaseStandardization,
+    effective_n_variants,
     find_variance_pinned_genetic_effects,
     var_A_from_effects,
     var_A_observed,
@@ -377,7 +379,8 @@ def test_compare_to_theory_shapes_and_no_AM_case():
     pop.simulate_generations(3)  # random mating
     m = measure_am_quantities(pop, "y", standardization=std)
     cmp = compare_to_theory(m, VA_0=base.V_A, h2_0=base.h2)
-    assert set(cmp) == {"eq:rhog-eq", "eq:VA-eq", "eq:hsq-eq", "eq:g-seg-var"}
+    assert set(cmp) == {"eq:rhog-eq", "eq:VA-eq", "eq:VA-eq-correction",
+                        "eq:hsq-eq", "eq:g-seg-var"}
     for key, entry in cmp.items():
         assert set(entry) == {"predicted", "measured", "rel_err"}
     # under random mating V_A should be close to its base value
@@ -417,3 +420,99 @@ def test_equilibrium_predictions_hold_in_simulation(AM_r, h2_0):
     assert predict_h2_eq(base.h2, rho_g) == pytest.approx(avg["h2"], rel=0.12)
     # eq:g-seg-var -- the sharpest of the four
     assert predict_seg_var(avg["V_A"], rho_g) == pytest.approx(avg["var_eps_o"], rel=0.10)
+
+
+# ---------------------------------------------------------------------------
+# M_e and the eq:VA-eq correction term
+# ---------------------------------------------------------------------------
+
+def test_M_e_equals_M_for_equal_effect_sizes():
+    """eq:Me-def is normalized so M_e = M when every variant has the same effect."""
+    pop = build_pop(N=200, M=50, seed=30)
+    effect = pop.traits["y"].effects["A"]
+    # force all standardized effects equal
+    effect.effects_standardized = np.full(pop.M, 0.1)
+    effect.effects_per_allele = effect.effects_standardized / effect.G_std
+    std = BaseStandardization.from_population(pop)
+    # pinned units reproduce the equal effects exactly
+    me = effective_n_variants(pop, "y", std)
+    assert me["M_e"] == pytest.approx(pop.M, rel=1e-6)
+    assert me["M"] == pop.M
+
+
+def test_M_e_is_smaller_when_effects_are_concentrated():
+    pop = build_pop(N=200, M=50, seed=31)
+    effect = pop.traits["y"].effects["A"]
+    concentrated = np.full(pop.M, 1e-6)
+    concentrated[0] = 1.0
+    effect.effects_standardized = concentrated
+    effect.effects_per_allele = concentrated / effect.G_std
+    std = BaseStandardization.from_population(pop)
+    assert effective_n_variants(pop, "y", std)["M_e"] < 2.0
+
+
+def test_M_e_is_invariant_to_global_rescaling():
+    pop = build_pop(N=200, M=50, seed=32)
+    std = BaseStandardization.from_population(pop)
+    before = effective_n_variants(pop, "y", std)["M_e"]
+    effect = pop.traits["y"].effects["A"]
+    effect.effects_per_allele = effect.effects_per_allele * 7.0
+    after = effective_n_variants(pop, "y", std)["M_e"]
+    assert after == pytest.approx(before, rel=1e-10)
+
+
+def test_M_e_pinned_is_stable_across_generations():
+    pop = build_pop(N=500, M=200, seed=33)
+    std = BaseStandardization.from_population(pop)
+    before = effective_n_variants(pop, "y", std)["M_e"]
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+    pop.simulate_generations(6)
+    assert effective_n_variants(pop, "y", std)["M_e"] == pytest.approx(before, rel=1e-10)
+
+
+def test_VA_eq_correction_is_negative_and_shrinks_like_one_over_Me():
+    """The writeup states the sign: dropping the term OVERSTATES V_A_eq."""
+    VA_0, rho_g = 1.0, 0.3
+    plain = predict_VA_eq(VA_0, rho_g)
+    errs = []
+    for M_e in (10.0, 100.0, 1000.0):
+        corrected = predict_VA_eq_corrected(VA_0, rho_g, M_e)
+        assert corrected < plain  # signed error: plain overstates
+        errs.append((plain - corrected) / plain)
+    # relative error falls by ~10x for each 10x in M_e
+    assert errs[0] / errs[1] == pytest.approx(10.0, rel=1e-6)
+    assert errs[1] / errs[2] == pytest.approx(10.0, rel=1e-6)
+
+
+def test_VA_eq_correction_vanishes_without_AM():
+    assert predict_VA_eq_corrected(1.0, 0.0, 100.0) == pytest.approx(predict_VA_eq(1.0, 0.0))
+
+
+def test_VA_eq_correction_rejects_bad_Me():
+    with pytest.raises(ValueError, match="M_e"):
+        predict_VA_eq_corrected(1.0, 0.3, 0.0)
+    with pytest.raises(ValueError, match="M_e"):
+        predict_VA_eq_corrected(1.0, 0.3, float("nan"))
+
+
+def test_measurements_carry_Me_and_sum_beta4():
+    pop = build_pop(N=400, M=150, seed=34)
+    std = BaseStandardization.from_population(pop)
+    m = measure_am_quantities(pop, "y", standardization=std)
+    assert m.M_e is not None and m.M_e > 1.0
+    assert m.sum_beta4 is not None and m.sum_beta4 > 0
+    # M_e = (sum beta^2)^2 / sum beta^4
+    assert m.M_e == pytest.approx(m.V_A_from_effects ** 2 / m.sum_beta4, rel=1e-9)
+
+
+def test_compare_to_theory_includes_corrected_VA_row():
+    pop = build_pop(N=600, M=200, seed=35)
+    std = BaseStandardization.from_population(pop)
+    base = measure_am_quantities(pop, "y", standardization=std)
+    pop.set_params(AM_r=0.5, AM_trait="y", AM_type="phenotypic")
+    pop.simulate_generations(4)
+    m = measure_am_quantities(pop, "y", standardization=std)
+    cmp = compare_to_theory(m, VA_0=base.V_A, h2_0=base.h2)
+    assert "eq:VA-eq-correction" in cmp
+    # the corrected prediction must sit below the plain one
+    assert cmp["eq:VA-eq-correction"]["predicted"] < cmp["eq:VA-eq"]["predicted"]

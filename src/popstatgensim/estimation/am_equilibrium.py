@@ -30,6 +30,7 @@ import numpy as np
 
 from ..traits.standardization import (
     BaseStandardization,
+    effective_n_variants,
     get_genetic_effect,
     var_A_from_effects,
     var_A_observed,
@@ -102,6 +103,39 @@ def predict_seg_var(V_A: float, rho_g: float) -> float:
     return 0.5 * float(V_A) * (1.0 - float(rho_g))
 
 
+def predict_VA_eq_corrected(VA_0: float, rho_g: float, M_e: float) -> float:
+    """Equilibrium additive variance keeping the term ``\\eqref{eq:VA-eq}`` drops.
+
+    Writeup ``\\eqref{eq:VA-eq-correction}``::
+
+        V_A_eq = V_A_0 / (1 - rho_g) * [1 - rho_g / (2 (1 - rho_g) M_e)]
+
+    ``\\eqref{eq:VA-eq}`` is an *approximation*, and the writeup states the sign of its
+    error: dropping the bracketed term **overstates** ``V_A_eq``, because a variant's
+    own departure from Hardy-Weinberg drags its contribution down. So the simulation
+    should sit predictably BELOW :func:`predict_VA_eq` by a computable amount, and the
+    residual should shrink like ``1 / M_e``.
+
+    That makes this a sharper test than "matches within Monte-Carlo error": comparing
+    against this corrected form at two or three values of ``M`` tests the approximation
+    itself rather than just its tolerance.
+
+    Parameters:
+        VA_0: Base-generation additive variance.
+        rho_g: Genetic correlation between mates (measured).
+        M_e: Effective number of variants, from
+            :func:`~popstatgensim.traits.standardization.effective_n_variants`.
+    """
+    rho_g = float(rho_g)
+    M_e = float(M_e)
+    if rho_g >= 1.0:
+        raise ValueError(f'rho_g must be < 1 for eq:VA-eq-correction, got {rho_g}.')
+    if not np.isfinite(M_e) or M_e <= 0:
+        raise ValueError(f'M_e must be a positive finite number, got {M_e}.')
+    correction = 1.0 - rho_g / (2.0 * (1.0 - rho_g) * M_e)
+    return float(VA_0) / (1.0 - rho_g) * correction
+
+
 # ---------------------------------------------------------------------------
 # Measurement
 # ---------------------------------------------------------------------------
@@ -145,6 +179,8 @@ class AMMeasurements:
     V_A_from_genotypes: Optional[float] = None
     V_A_from_effects: Optional[float] = None
     V_A_from_effects_current_std: Optional[float] = None
+    M_e: Optional[float] = None
+    sum_beta4: Optional[float] = None
     parent_h2: Optional[float] = None
     parent_V_A: Optional[float] = None
     n_mate_pairs: Optional[int] = None
@@ -286,6 +322,9 @@ def measure_am_quantities(pop, trait: str,
                      if standardization is not None else None)
     VA_eff_current = var_A_from_effects(pop, trait, None, component=component)
 
+    # M_e controls the size of the term eq:VA-eq drops -- see predict_VA_eq_corrected.
+    me = effective_n_variants(pop, trait, standardization, component=component)
+
     rho_y = rho_g = var_eps_o = n_pairs = None
     parent_h2 = parent_V_A = None
     if 'parents' in pop.relations:
@@ -329,6 +368,8 @@ def measure_am_quantities(pop, trait: str,
         V_A_from_genotypes=V_A_geno,
         V_A_from_effects=VA_eff_pinned,
         V_A_from_effects_current_std=VA_eff_current,
+        M_e=me['M_e'],
+        sum_beta4=me['sum_beta4'],
         parent_h2=parent_h2,
         parent_V_A=parent_V_A,
         n_mate_pairs=n_pairs,
@@ -375,10 +416,13 @@ def compare_to_theory(measured: AMMeasurements, VA_0: float, h2_0: float) -> dic
 
     if rho_g is not None and np.isfinite(rho_g) and rho_g < 1.0:
         out['eq:VA-eq'] = _entry(predict_VA_eq(VA_0, rho_g), measured.V_A)
+        if measured.M_e is not None and np.isfinite(measured.M_e) and measured.M_e > 0:
+            out['eq:VA-eq-correction'] = _entry(
+                predict_VA_eq_corrected(VA_0, rho_g, measured.M_e), measured.V_A)
         out['eq:hsq-eq'] = _entry(predict_h2_eq(h2_0, rho_g), measured.h2)
         out['eq:g-seg-var'] = _entry(predict_seg_var(measured.V_A, rho_g), measured.var_eps_o)
     else:
-        for key in ('eq:VA-eq', 'eq:hsq-eq', 'eq:g-seg-var'):
+        for key in ('eq:VA-eq', 'eq:VA-eq-correction', 'eq:hsq-eq', 'eq:g-seg-var'):
             out[key] = _entry(None, None)
 
     return out
