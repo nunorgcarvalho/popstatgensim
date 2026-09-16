@@ -11,6 +11,13 @@ from .estimation import (
     run_REML,
 )
 from .genome import PCAResult
+from .pedigree import (
+    PathSignature,
+    PedigreeGraph,
+    enumerate_class,
+    predicted_cov,
+    relate,
+)
 from .io import (
     align_samples,
     export_GRM_GCTA,
@@ -40,6 +47,11 @@ __all__ = [
     "RandomEffect",
     "NoiseEffect",
     "PCAResult",
+    "PedigreeGraph",
+    "PathSignature",
+    "relate",
+    "enumerate_class",
+    "predicted_cov",
     "run_EO_AM",
     "BaseStandardization",
     "AMMeasurements",

@@ -14,12 +14,46 @@ from .ibd import (
     get_true_IBD_tensor,
     greedy_unrelated_subset,
 )
+from .graph import PedigreeGraph
+from .paths import (
+    LinealChain,
+    MatingChain,
+    PathSignature,
+    chain_weight,
+    implied_covariance,
+    predicted_corr,
+    predicted_cov,
+    proband_correction,
+)
 from .pedigree import PedKey2, PedPath, PathSig, Pedigree, RelObj
+from .relate import (
+    KNOWN_SIGNATURES,
+    VALID_CLASS_SPECS,
+    RelateResult,
+    enumerate_class,
+    relate,
+    signature_name,
+)
 from .relations import get_relation_matrix, initialize_relations
 from .relative_types import REL_TYPES
 
 __all__ = [
     "REL_TYPES",
+    "PedigreeGraph",
+    "PathSignature",
+    "LinealChain",
+    "MatingChain",
+    "chain_weight",
+    "implied_covariance",
+    "proband_correction",
+    "predicted_cov",
+    "predicted_corr",
+    "relate",
+    "RelateResult",
+    "enumerate_class",
+    "signature_name",
+    "KNOWN_SIGNATURES",
+    "VALID_CLASS_SPECS",
     "PedPath",
     "PedKey2",
     "PathSig",

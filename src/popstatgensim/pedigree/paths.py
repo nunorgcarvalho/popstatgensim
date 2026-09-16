@@ -40,6 +40,15 @@ import numpy as np
 PROBAND_CASES = ('sink', 'source', 'terminal_mating')
 
 
+def _round_rho_y(mapping, round_id, default):
+    """Looks up a matching round's realized rho_y, falling back to the pooled value."""
+    try:
+        value = mapping[round_id]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if value is None else value
+
+
 def _is_zero(value) -> bool:
     """Zero test that tolerates symbolic inputs.
 
@@ -267,7 +276,7 @@ def proband_correction(case: str, rho_y: float, rho_g: float) -> float:
 
 
 def predicted_cov(signature: PathSignature, V_A: float, rho_y: float, rho_g: float,
-                  phenotypic: bool = True) -> float:
+                  phenotypic: bool = True, rho_y_by_round=None) -> float:
     """``\\eqref{eq:path-product}`` times ``\\eqref{eq:proband-correction}``.
 
     Genetic::
@@ -290,6 +299,12 @@ def predicted_cov(signature: PathSignature, V_A: float, rho_y: float, rho_g: flo
         rho_g: Genetic correlation between mates. Measured, not nominal.
         phenotypic: Whether to apply the proband corrections. ``True`` returns
             ``Cov[y_A, y_B]``, ``False`` returns ``Cov[g_A, g_B]``.
+        rho_y_by_round: Optional mapping (dict or sequence) from matching-round index to
+            that round's REALIZED ``rho_y``. Only then are a signature's
+            ``mating_round_ids`` used; without it the pooled ``rho_y`` is applied to
+            every mating, which is the writeup's own closed form. Supply it when a
+            chain crosses rounds whose realized correlations differ -- round k > 1 draws
+            from a smaller pool and attenuates slightly.
 
     ``V_A``, ``rho_y`` and ``rho_g`` may be sympy symbols, in which case the closed form
     is returned symbolically -- useful for checking against the writeup's algebra and
@@ -298,14 +313,17 @@ def predicted_cov(signature: PathSignature, V_A: float, rho_y: float, rho_g: flo
     exponent = signature.sum_N_lin - signature.sum_N_o
     value = V_A * ((1 + rho_g) / 2) ** exponent
 
+    # `mating_round_ids` holds round INDICES, not correlations. They only become
+    # rho_y values once the caller supplies the realized per-round correlations; without
+    # that mapping the pooled rho_y is used, which is the writeup's own closed form.
     per_chain_rounds = signature.mating_round_ids
     for idx, (N_mu, N_o) in enumerate(signature.mating_chains):
         rho_y_chain = None
-        if per_chain_rounds is not None and idx < len(per_chain_rounds):
+        if (rho_y_by_round is not None and per_chain_rounds is not None
+                and idx < len(per_chain_rounds)):
             entry = per_chain_rounds[idx]
-            # a tuple of realized rho_y values, one per mating edge in this chain
             if entry is not None and len(entry) > 0:
-                rho_y_chain = entry
+                rho_y_chain = [_round_rho_y(rho_y_by_round, r, rho_y) for r in entry]
         value = value * chain_weight(N_mu, N_o, rho_y, rho_g, rho_y_chain=rho_y_chain)
 
     if phenotypic:
@@ -315,7 +333,7 @@ def predicted_cov(signature: PathSignature, V_A: float, rho_y: float, rho_g: flo
 
 
 def predicted_corr(signature: PathSignature, V_A: float, V_Y: float,
-                   rho_y: float, rho_g: float) -> float:
+                   rho_y: float, rho_g: float, rho_y_by_round=None) -> float:
     """Phenotypic correlation implied by a path -- the quantity the 0.005 floor is in.
 
     The search floor is stated on the phenotypic correlation rather than on a
@@ -324,4 +342,5 @@ def predicted_corr(signature: PathSignature, V_A: float, V_Y: float,
     """
     if isinstance(V_Y, (int, float)) and V_Y <= 0:
         raise ValueError('V_Y must be positive.')
-    return predicted_cov(signature, V_A, rho_y, rho_g, phenotypic=True) / V_Y
+    return predicted_cov(signature, V_A, rho_y, rho_g, phenotypic=True,
+                         rho_y_by_round=rho_y_by_round) / V_Y
