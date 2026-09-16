@@ -32,6 +32,7 @@ from ..traits.standardization import (
     BaseStandardization,
     effective_n_variants,
     get_genetic_effect,
+    hardy_weinberg_departure,
     var_A_from_effects,
     var_A_observed,
     var_A_pinned,
@@ -42,8 +43,9 @@ from ..utils.stats import corr
 __all__ = [
     'AMMeasurements', 'compare_to_theory', 'effective_n_variants',
     'measure_am_quantities', 'measure_mate_correlations', 'measure_segregation_variance',
-    'predict_VA_eq', 'predict_VA_eq_corrected', 'predict_h2_eq', 'predict_rho_g_eq',
-    'predict_seg_var',
+    'hardy_weinberg_departure',
+    'predict_VA_eq', 'predict_VA_eq_corrected', 'predict_VA_eq_exact',
+    'predict_h2_eq', 'predict_rho_g_eq', 'predict_seg_var', 'predict_seg_var_exact',
 ]
 
 
@@ -109,6 +111,44 @@ def predict_seg_var(V_A: float, rho_g: float) -> float:
     assortative mating. ``V_A`` and ``rho_g`` here are the *equilibrium* values.
     """
     return 0.5 * float(V_A) * (1.0 - float(rho_g))
+
+
+def predict_VA_eq_exact(VA_0: float, sum_beta2_a: float, rho_g: float) -> float:
+    """``\\eqref{eq:VA-eq-exact}`` -- the equilibrium additive variance with NO approximation.
+
+    ``V_A^(eq) = (V_A^(0) - 2 sum_k beta_k^2 a_kk) / (1 - rho_g)``
+
+    ``\\eqref{eq:VA-eq}`` and ``\\eqref{eq:VA-eq-correction}`` both reach a closed form by
+    replacing the drag term ``2 sum_k beta_k^2 a_kk`` with an approximation
+    (``\\eqref{eq:VA-eq-drag}``, which goes through ``Uniform-inflation``). Feeding the
+    MEASURED drag term here instead removes that approximation entirely, which separates
+    "the drag term is right but Uniform-inflation mis-evaluates it" from "the drag term
+    itself is wrong" -- a distinction no residual against the approximated forms can make.
+
+    Parameters:
+        VA_0: Base-generation additive variance.
+        sum_beta2_a: Measured ``sum_k beta_k^2 a_kk``, from
+            :func:`~popstatgensim.traits.standardization.hardy_weinberg_departure`.
+            Note this is the UN-doubled sum; the factor of 2 is applied here.
+        rho_g: Measured genetic correlation between mates.
+    """
+    rho_g = float(rho_g)
+    if rho_g >= 1.0:
+        raise ValueError(f'rho_g must be < 1 for eq:VA-eq-exact, got {rho_g}.')
+    return (float(VA_0) - 2.0 * float(sum_beta2_a)) / (1.0 - rho_g)
+
+
+def predict_seg_var_exact(VA_0: float, sum_beta2_a: float) -> float:
+    """Exact segregation variance: half the numerator of ``\\eqref{eq:VA-eq-exact}``.
+
+    ``Var[eps_o] = (V_A^(0) - 2 sum_k beta_k^2 a_kk) / 2``
+
+    The writeup notes that half that numerator "will come up again as the variance of
+    the deviation of offspring genetic values from their parents' average". So this is
+    ``\\eqref{eq:g-seg-var}`` with no approximation, and it is a sharper test than
+    comparing against ``0.5 V_A (1 - rho_g)``.
+    """
+    return (float(VA_0) - 2.0 * float(sum_beta2_a)) / 2.0
 
 
 def predict_VA_eq_corrected(VA_0: float, rho_g: float, M_e: float) -> float:
@@ -202,6 +242,8 @@ class AMMeasurements:
     V_A_from_effects_current_std: Optional[float] = None
     M_e: Optional[float] = None
     sum_beta4: Optional[float] = None
+    sum_beta2_a: Optional[float] = None
+    mean_a_kk: Optional[float] = None
     V_E: Optional[float] = None
     h2_cov_free: Optional[float] = None
     corr_g_e: Optional[float] = None
@@ -369,6 +411,13 @@ def measure_am_quantities(pop, trait: str,
     # M_e controls the size of the term eq:VA-eq drops -- see predict_VA_eq_corrected.
     me = effective_n_variants(pop, trait, standardization, component=component)
 
+    # a_kk: the departure from Hardy-Weinberg that eq:VA-eq-exact needs. Measuring it
+    # removes the Uniform-inflation approximation from the equilibrium prediction.
+    try:
+        hw = hardy_weinberg_departure(pop, trait, standardization, component=component)
+    except ValueError:
+        hw = None
+
     rho_y = rho_g = var_eps_o = n_pairs = None
     parent_h2 = parent_V_A = None
     if 'parents' in pop.relations:
@@ -414,6 +463,8 @@ def measure_am_quantities(pop, trait: str,
         V_A_from_effects_current_std=VA_eff_current,
         M_e=me['M_e'],
         sum_beta4=me['sum_beta4'],
+        sum_beta2_a=None if hw is None else hw['sum_beta2_a'],
+        mean_a_kk=None if hw is None else hw['mean_a_kk'],
         V_E=V_E,
         h2_cov_free=h2_cov_free,
         corr_g_e=corr_g_e,

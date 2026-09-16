@@ -1677,6 +1677,22 @@ class Population:
         '''
         if 'spouses' not in self.relations:
             raise Exception('Spouse relationship matrix not found in object. Make sure to call `_pair_mates()` at least once to generate spouse relationships.')
+        # D-0013: the compact `spouses` array keeps only each individual's FIRST mate, so
+        # under non-monogamy this would silently return a round-1-biased figure. A
+        # quietly-wrong public helper is worse than one that refuses.
+        edges = np.asarray(self.relations.get('mate_edges', np.zeros((0, 2))),
+                           dtype=np.int32).reshape(-1, 2)
+        spouse_compact = np.asarray(self.relations['spouses'], dtype=np.int32)
+        n_compact = int(np.sum((spouse_compact >= 0)
+                               & (np.arange(self.N) < spouse_compact)))
+        if edges.shape[0] > n_compact:
+            raise Exception(
+                f'`get_spouse_corr` is monogamy-only: the compact spouse array holds '
+                f'{n_compact} pairs but this generation has {edges.shape[0]} mate pairs, '
+                'so it would report a first-mate-only figure. Use '
+                '`popstatgensim.estimation.measure_mate_correlations`, which reads the '
+                'full mate edge list.'
+            )
         if trait not in self.traits:
             raise Exception(f'Trait {trait} not found in population traits.')
         if type == 'phenotypic':

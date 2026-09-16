@@ -170,6 +170,10 @@ class MateGraph:
         n_rounds: How many rounds were run.
         rejections: Per-round count of constraint rejections that needed repair.
         round_rho_y: Per-round realized phenotypic correlation between mates.
+        dropped: Per-round count of pairs that could NOT be repaired and so did not
+            mate. Recorded rather than silently absorbed: it is ~0.1% of pairs at
+            q_2 = 1 and does not affect offspring count (N stays exact), but
+            silent-and-small becomes silent-and-large without anyone noticing.
     """
 
     edges: np.ndarray
@@ -178,6 +182,12 @@ class MateGraph:
     n_rounds: int = 1
     rejections: Optional[np.ndarray] = None
     round_rho_y: Optional[np.ndarray] = None
+    dropped: Optional[np.ndarray] = None
+
+    @property
+    def n_dropped(self) -> int:
+        """Total mate pairs lost to unrepairable constraint rejections."""
+        return 0 if self.dropped is None else int(np.sum(self.dropped))
 
     def __post_init__(self):
         self.edges = np.asarray(self.edges, dtype=np.int32).reshape(-1, 2)
@@ -337,6 +347,7 @@ def build_mate_graph(N: int,
     edges = []
     round_ids = []
     rejections = np.zeros(len(q), dtype=np.int32)
+    dropped = np.zeros(len(q), dtype=np.int32)
     round_rho = np.full(len(q), np.nan, dtype=float)
 
     for k, q_k in enumerate(q):
@@ -356,10 +367,11 @@ def build_mate_graph(N: int,
 
         ordered_f, ordered_m = _match_one_round(f_pool, m_pool, am_values, rho_y, rescale)
 
-        accepted_f, accepted_m, n_rejected = _apply_constraints(
+        accepted_f, accepted_m, n_rejected, n_dropped = _apply_constraints(
             ordered_f, ordered_m, uf, seen_pairs, relative_of,
         )
         rejections[k] = n_rejected
+        dropped[k] = n_dropped
 
         if len(accepted_f) > 0:
             edges.append(np.stack((accepted_f, accepted_m), axis=1))
@@ -377,7 +389,7 @@ def build_mate_graph(N: int,
         round_arr = np.zeros(0, dtype=np.int32)
 
     return MateGraph(edges=edge_arr, N=N, round_id=round_arr, n_rounds=len(q),
-                     rejections=rejections, round_rho_y=round_rho)
+                     rejections=rejections, round_rho_y=round_rho, dropped=dropped)
 
 
 def _apply_constraints(ordered_f, ordered_m, uf, seen_pairs, relative_of):
@@ -405,6 +417,7 @@ def _apply_constraints(ordered_f, ordered_m, uf, seen_pairs, relative_of):
 
     accepted_f, accepted_m = [], []
     n_rejected = 0
+    n_dropped = 0
 
     for idx in range(n):
         if ok(f[idx], m[idx]):
@@ -422,7 +435,9 @@ def _apply_constraints(ordered_f, ordered_m, uf, seen_pairs, relative_of):
                     break
             n_rejected += 1
             if chosen is None:
-                continue  # unrepairable; this individual simply does not mate this round
+                # unrepairable; this individual simply does not mate this round
+                n_dropped += 1
+                continue
 
         i, j = int(f[chosen]), int(m[chosen])
         if uf is not None:
@@ -434,7 +449,7 @@ def _apply_constraints(ordered_f, ordered_m, uf, seen_pairs, relative_of):
 
     return (np.array(accepted_f, dtype=np.int32),
             np.array(accepted_m, dtype=np.int32),
-            n_rejected)
+            n_rejected, n_dropped)
 
 
 # ---------------------------------------------------------------------------

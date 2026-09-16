@@ -294,3 +294,66 @@ def effective_n_variants(pop, trait: str,
     M_e = float(sum_b2 ** 2 / sum_b4) if sum_b4 > 0 else float('nan')
     return {'M_e': M_e, 'sum_beta2': sum_b2, 'sum_beta4': sum_b4,
             'standardization': label, 'M': int(beta.shape[0])}
+
+
+def hardy_weinberg_departure(pop, trait: str,
+                             standardization: Optional[BaseStandardization] = None,
+                             component: str = 'A') -> dict:
+    """Within-individual departure from Hardy-Weinberg, ``a_kk``, and ``sum_k beta_k^2 a_kk``.
+
+    ``a_kk = Cov[z^(m)_k, z^(p)_k]`` is the covariance between an individual's two
+    haplotypes at variant ``k`` in standardized units, so ``Var[x_ik] = 1 + 2 a_kk``
+    (the writeup's ``\\eqref{eq:varx-a}``). It is zero under Hardy-Weinberg and grows
+    positive under assortative mating.
+
+    This is what makes the writeup's **exact** equilibrium formula testable::
+
+        V_A^(eq) = (V_A^(0) - 2 sum_k beta_k^2 a_kk) / (1 - rho_g)     eq:VA-eq-exact
+
+    ``\\eqref{eq:VA-eq}`` reaches its closed form by replacing that drag term with an
+    approximation (``\\eqref{eq:VA-eq-drag}``, via ``Uniform-inflation``). Measuring
+    ``sum_k beta_k^2 a_kk`` directly separates two things a residual against
+    ``\\eqref{eq:VA-eq-correction}`` otherwise confounds: whether the drag term itself
+    is right, versus whether ``Uniform-inflation`` evaluates it accurately.
+
+    Half the same numerator is the exact segregation variance -- see
+    :func:`~popstatgensim.estimation.am_equilibrium.predict_seg_var_exact`.
+
+    Returns a dict with ``sum_beta2_a`` (the drag term, un-doubled), ``mean_a_kk``,
+    ``max_a_kk``, the ``V_A_0`` it should be compared against, and the standardization
+    used. Requires haplotypes (``pop.H``).
+    """
+    H = getattr(pop, 'H', None)
+    if H is None:
+        raise ValueError('Haplotypes (pop.H) are required to measure a_kk.')
+    H = np.asarray(H)
+    if H.ndim != 3 or H.shape[2] != 2:
+        raise ValueError('a_kk is defined for diploids; pop.H must be (N, M, 2).')
+
+    effect = get_genetic_effect(pop.traits[trait], component=component)
+    if standardization is None:
+        p = np.asarray(pop.p, dtype=float)
+        beta = np.asarray(effect.effects_standardized, dtype=float)
+        label = f'current@t={int(pop.t)}'
+    else:
+        # Constant-freq pins the denominator to the BASE generation's frequencies
+        p = standardization.p
+        beta = standardization.to_standardized_effects(effect.effects_per_allele)
+        label = standardization.label
+
+    hap_m = H[:, :, 0].astype(float)
+    hap_p = H[:, :, 1].astype(float)
+    cov_raw = ((hap_m - hap_m.mean(axis=0)) * (hap_p - hap_p.mean(axis=0))).mean(axis=0)
+
+    denom = 2.0 * p * (1.0 - p)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        a_kk = np.where(denom > 0, cov_raw / denom, 0.0)
+
+    return {
+        'sum_beta2_a': float(np.sum(beta ** 2 * a_kk)),
+        'mean_a_kk': float(np.mean(a_kk)),
+        'max_a_kk': float(np.max(np.abs(a_kk))),
+        'V_A_0': float(np.sum(beta ** 2)),
+        'standardization': label,
+        'M': int(a_kk.shape[0]),
+    }

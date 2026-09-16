@@ -36,6 +36,7 @@ from .random_effects import (
 from .standardization import (
     BaseStandardization,
     effective_n_variants,
+    hardy_weinberg_departure,
     var_A_from_effects,
     var_A_observed,
     var_A_pinned,
@@ -54,6 +55,7 @@ __all__ = [
     "var_A_observed",
     "var_A_from_effects",
     "effective_n_variants",
+    "hardy_weinberg_departure",
     "find_variance_pinned_genetic_effects",
     "warn_if_variance_pinned_under_AM",
     "generate_causal_effects",

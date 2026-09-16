@@ -543,3 +543,41 @@ def test_chain_correlation_matches_both_targets_within_error():
         build_mate_graph(N, sex, y, rho_y=0.7, q=[1.0, 0.6]), y)
     assert out["corr"] == pytest.approx(out["rho_y_product"], rel=0.10)
     assert out["corr"] == pytest.approx(out["rho_y_squared"], rel=0.10)
+
+
+def test_dropped_pairs_are_recorded_not_silent():
+    """D-0013 theme: small-and-silent becomes large-and-silent without anyone noticing."""
+    N = 2000
+    rng = np.random.default_rng(21)
+    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
+    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+    g = build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 1.0])
+    assert g.dropped is not None
+    assert g.dropped.shape[0] == 2
+    assert g.n_dropped == int(g.dropped.sum())
+    # it should stay tiny -- flag loudly if this ever grows
+    assert g.n_dropped < 0.01 * g.U
+
+
+def test_get_spouse_corr_raises_under_non_monogamy():
+    """D-0013: it must refuse rather than return a first-mate-only figure."""
+    pop = build_am_pop(N=600, M=60, q=[1.0, 0.8])
+    pop.simulate_generations(1)
+    with pytest.raises(Exception, match="monogamy-only"):
+        pop.past[1].get_spouse_corr("y")
+
+
+def test_get_spouse_corr_still_works_under_monogamy():
+    pop = build_am_pop(N=600, M=60, q=None)
+    pop.simulate_generations(1)
+    r = pop.past[1].get_spouse_corr("y")
+    assert 0.2 < r < 0.8  # AM_r = 0.5
+
+
+def test_measure_mate_correlations_is_the_multi_mate_replacement():
+    from popstatgensim.estimation import measure_mate_correlations
+    pop = build_am_pop(N=600, M=60, q=[1.0, 0.8])
+    pop.simulate_generations(1)
+    out = measure_mate_correlations(pop.past[1], "y")
+    assert out["n_mate_pairs"] == pop.past[1].relations["mate_edges"].shape[0]
+    assert 0.2 < out["rho_y"] < 0.8

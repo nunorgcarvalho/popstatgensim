@@ -17,6 +17,9 @@ from popstatgensim.estimation import (
     predict_seg_var,
     predict_VA_eq,
     predict_VA_eq_corrected,
+    predict_VA_eq_exact,
+    predict_seg_var_exact,
+    hardy_weinberg_departure,
 )
 from popstatgensim.traits import (
     BaseStandardization,
@@ -580,3 +583,54 @@ def test_compare_to_theory_cov_free_flag_selects_the_measured_h2():
     noisy = compare_to_theory(m, VA_0=base.V_A, h2_0=base.h2_cov_free, cov_free=False)
     assert free["eq:hsq-eq"]["measured"] == pytest.approx(m.h2_cov_free)
     assert noisy["eq:hsq-eq"]["measured"] == pytest.approx(m.h2)
+
+
+# ---------------------------------------------------------------------------
+# a_kk and the EXACT equilibrium formulas
+# ---------------------------------------------------------------------------
+
+def test_a_kk_is_near_zero_in_the_base_generation():
+    """Base genotypes are drawn as independent binomials, so Hardy-Weinberg holds."""
+    N = 4000
+    pop = build_pop(N=N, M=200, seed=50)
+    std = BaseStandardization.from_population(pop)
+    hw = hardy_weinberg_departure(pop, "y", std)
+    assert abs(hw["mean_a_kk"]) < 5.0 / np.sqrt(N)
+    assert abs(hw["sum_beta2_a"]) < 0.02 * hw["V_A_0"]
+
+
+def test_a_kk_grows_positive_under_assortative_mating():
+    """AM induces positive within-individual correlation between the two haplotypes."""
+    pop = build_pop(N=2000, M=100, seed=51)
+    std = BaseStandardization.from_population(pop)
+    before = hardy_weinberg_departure(pop, "y", std)["sum_beta2_a"]
+    pop.set_params(AM_r=0.6, AM_trait="y", AM_type="phenotypic")
+    pop.simulate_generations(10)
+    after = hardy_weinberg_departure(pop, "y", std)["sum_beta2_a"]
+    assert after > before
+    assert after > 0
+
+
+def test_exact_VA_formula_reduces_to_the_approximation_when_drag_is_zero():
+    """With a_kk = 0 the exact form is exactly V_A_0/(1-rho_g)."""
+    assert predict_VA_eq_exact(1.0, 0.0, 0.3) == pytest.approx(predict_VA_eq(1.0, 0.3))
+
+
+def test_exact_seg_var_is_half_the_same_numerator():
+    """The writeup: half the numerator of eq:VA-eq-exact IS the segregation variance."""
+    VA_0, sba, rho_g = 0.5, 0.003, 0.28
+    assert predict_seg_var_exact(VA_0, sba) == pytest.approx(
+        predict_VA_eq_exact(VA_0, sba, rho_g) * (1 - rho_g) / 2)
+
+
+def test_exact_VA_is_below_the_plain_approximation_under_AM():
+    """a_kk > 0 drags V_A down, which is the signed error eq:VA-eq is known to have."""
+    assert predict_VA_eq_exact(1.0, 0.005, 0.3) < predict_VA_eq(1.0, 0.3)
+
+
+def test_measurements_carry_a_kk():
+    pop = build_pop(N=1000, M=100, seed=52)
+    std = BaseStandardization.from_population(pop)
+    m = measure_am_quantities(pop, "y", standardization=std)
+    assert m.sum_beta2_a is not None
+    assert m.mean_a_kk is not None
