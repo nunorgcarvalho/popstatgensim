@@ -300,9 +300,22 @@ class SuperPopulation:
         row_offsets = np.cumsum([0] + [pop_i.N for pop_i in gen_pops])
 
         next_family = 0
+        mate_edge_blocks = []
+        mate_round_blocks = []
         for k, pop_i in enumerate(gen_pops):
             i_start = row_offsets[k]
             i_end = row_offsets[k + 1]
+
+            # carry the mate graph across, shifted into this sub-population's rows
+            sub_edges = np.asarray(
+                pop_i.relations.get('mate_edges', np.zeros((0, 2))), dtype=np.int32,
+            ).reshape(-1, 2)
+            if sub_edges.shape[0] > 0:
+                mate_edge_blocks.append(sub_edges + i_start)
+                mate_round_blocks.append(np.asarray(
+                    pop_i.relations.get('mate_round_id', np.zeros(sub_edges.shape[0])),
+                    dtype=np.int32,
+                ).reshape(-1))
 
             spouse_ids = np.asarray(pop_i.relations['spouses'], dtype=np.int32)
             valid_spouse = spouse_ids >= 0
@@ -318,6 +331,15 @@ class SuperPopulation:
                 shifted_family[valid_family] = inverse + next_family
                 next_family = shifted_family[valid_family].max() + 1
             relations['full_sibs'][i_start:i_end] = shifted_family
+
+        relations['mate_edges'] = (
+            np.concatenate(mate_edge_blocks, axis=0).astype(np.int32, copy=False)
+            if mate_edge_blocks else np.zeros((0, 2), dtype=np.int32)
+        )
+        relations['mate_round_id'] = (
+            np.concatenate(mate_round_blocks).astype(np.int32, copy=False)
+            if mate_round_blocks else np.zeros(0, dtype=np.int32)
+        )
 
         if joined_prev is not None:
             prev_sizes = [int(pop_i.relations.get('parent_N', pop_i.N)) for pop_i in gen_pops]

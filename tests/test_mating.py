@@ -444,3 +444,29 @@ def test_subset_individuals_drops_mate_edges_with_a_removed_partner():
     assert edges.shape[0] < n_before
     if edges.shape[0] > 0:
         assert edges.min() >= 0 and edges.max() < subset.N
+
+
+def test_mate_correlations_use_all_mates_not_just_the_first():
+    """Reading the lossy spouse array would drop every non-first mate pair.
+
+    Under non-monogamy that would bias the measured mate correlations toward round 1,
+    so the measurement must read the full mate edge list.
+    """
+    from popstatgensim.estimation import measure_mate_correlations
+    from popstatgensim.estimation.am_equilibrium import _mate_pairs
+
+    pop = build_am_pop(N=600, M=80, q=[1.0, 0.8])
+    pop.simulate_generations(1)
+    parent = pop.past[1]
+
+    i, j = _mate_pairs(parent)
+    n_edges = parent.relations["mate_edges"].shape[0]
+    assert len(i) == n_edges
+
+    # the spouse array keeps strictly fewer pairs
+    spouse = np.asarray(parent.relations["spouses"], dtype=np.int32)
+    n_spouse_pairs = int(np.sum((spouse >= 0) & (np.arange(parent.N) < spouse)))
+    assert n_spouse_pairs < n_edges
+
+    out = measure_mate_correlations(parent, "y")
+    assert out["n_mate_pairs"] == n_edges

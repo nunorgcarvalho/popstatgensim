@@ -216,7 +216,18 @@ class AMMeasurements:
 
 
 def _mate_pairs(parent_pop) -> tuple[np.ndarray, np.ndarray]:
-    """Returns the (i, j) index arrays of each mate pair, each pair listed once."""
+    """Returns the (i, j) index arrays of each mate pair, each pair listed once.
+
+    Prefers the full mate edge list. The length-N ``spouses`` array keeps only each
+    individual's FIRST mate, so under non-monogamy reading it would silently drop every
+    later mate pair and bias the measured mate correlations toward round 1.
+    """
+    edges = parent_pop.relations.get('mate_edges')
+    if edges is not None:
+        edges = np.asarray(edges, dtype=np.int32).reshape(-1, 2)
+        if edges.shape[0] > 0:
+            return edges[:, 0], edges[:, 1]
+
     if 'spouses' not in parent_pop.relations:
         raise ValueError(
             'No spouse relationship stored for the parent generation. '
