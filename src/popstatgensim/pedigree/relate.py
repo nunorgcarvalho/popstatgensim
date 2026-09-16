@@ -205,15 +205,6 @@ def _candidate_signatures(graph: PedigreeGraph, A: int, B: int,
     ends_A = list(_endpoints(graph, A, max_up))
     ends_B = list(_endpoints(graph, B, max_up))
 
-    # If one proband is a lineal ancestor of the other, the relationship IS lineal and
-    # the lineal chain is its correct representation. Routing it through the ancestor's
-    # own mating edge instead would double-count the same meiosis and (because the
-    # terminal-mating correction multiplies by 1/h^2) badly overstate the covariance.
-    # NOTE: this rule is our reading, not something the writeup states explicitly.
-    anc_A = graph.ancestors(A, max_up=max_up)
-    anc_B = graph.ancestors(B, max_up=max_up)
-    lineal_pair = (B in anc_A) or (A in anc_B)
-
     for node_a, n_a, dir_a in ends_A:
         for node_b, n_b, dir_b in ends_B:
             # --- lineal / common-ancestor, no mating chain ---
@@ -227,7 +218,7 @@ def _candidate_signatures(graph: PedigreeGraph, A: int, B: int,
                         yield PathSignature(n_a + n_b, 0, (), case_a, case_b), 'lineal'
                 continue
 
-            if lineal_pair or max_mating_chains < 1:
+            if max_mating_chains < 1:
                 continue
 
             chain = graph.mating_chain(node_a, node_b)
@@ -246,6 +237,25 @@ def _candidate_signatures(graph: PedigreeGraph, A: int, B: int,
             # N_o counts out-edges: only chains that DESCEND from the mating chain
             N_o = int(dir_a == 'up') + int(dir_b == 'up')
             sum_N_lin = n_a + n_b
+
+            # (N_mu = 1, N_o = 1) is excluded: one mating edge feeding one descending
+            # lineal chain IS that descent, already counted as a meiosis. Admitting it
+            # double-counts the step, and because the entering proband then sits on a
+            # TERMINAL MATING CHAIN it picks up C = 1/h^2 instead of
+            # (1+rho_y)/(1+rho_g) -- inflating the answer by (1+rho_g)/(h^2(1+rho_y)),
+            # about 1.48 at h^2=0.58. Concretely it turns parent-offspring from 0.43
+            # into 0.66, and best-first search PREFERS it, so it is not a harmless
+            # extra candidate.
+            #
+            # The printed rules in the writeup admit this configuration: chains
+            # alternate, no individual repeats, and the outer-parent condition holds.
+            # The exclusion is nonetheless the intended reading -- the writeup's own
+            # figures/make_figures.py skips the same cell ("N_mu = N_U = 1 is a meiosis,
+            # absorbed into a lineal chain"), and the N_S branches are known to disagree
+            # with the defining binomial sum there. Reported to the controller as a
+            # load-bearing wording gap in the .tex.
+            if chain['N_mu'] == 1 and N_o == 1:
+                continue
 
             def case_for(n, d):
                 if n == 0:

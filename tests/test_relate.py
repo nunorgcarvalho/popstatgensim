@@ -410,3 +410,47 @@ def test_relate_matches_brute_force_on_a_small_pedigree():
     fast = relate(g, A, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
     assert fast.signature.key == exhaustive.signature.key
     assert fast.corr == pytest.approx(max(c for _, c in exhaustive.all_paths))
+
+
+def test_nmu1_no1_cell_is_excluded():
+    """(N_mu = 1, N_o = 1): one mating edge feeding one descent IS that descent.
+
+    Admitting it double-counts the meiosis, and the entering proband then sits on a
+    terminal mating chain and picks up C = 1/h^2 rather than (1+rho_y)/(1+rho_g). The
+    inflation factor is (1+rho_g)/(h^2 (1+rho_y)), about 1.48 at h^2 = 0.58 -- which
+    turns parent-offspring from 0.43 into 0.66. Best-first search PREFERS the inflated
+    route, so excluding it is load-bearing rather than tidy.
+
+    The printed rules in the writeup admit the configuration; the exclusion matches the
+    writeup's own make_figures.py, which skips the same cell.
+    """
+    g, A, B = hand_built_mating_chain(1)   # A and B are full sibs via parents 0 -- 1
+    # parent 0 and child B: a genuine parent-offspring pair inside the same pedigree
+    r = relate(g, 0, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y, floor=1e-12)
+    assert r.related
+    # must be the lineal answer, not the inflated mating route
+    expected = predicted_cov(PathSignature(1, 0, (), "source", "sink"),
+                             V_A, RHO_Y, RHO_G, phenotypic=True)
+    assert r.cov == pytest.approx(expected)
+    assert r.name == "parent-offspring"
+    # no candidate anywhere in the search may carry that cell
+    diag = relate(g, 0, B, rho_y=RHO_Y, rho_g=RHO_G, V_A=V_A, V_Y=V_Y,
+                  floor=1e-12, return_all=True)
+    for sig, _ in diag.all_paths:
+        assert (1, 1) not in sig.mating_chains
+
+
+def test_excluded_cell_would_have_won_if_admitted():
+    """Quantifies why the exclusion matters: the spurious route scores HIGHER."""
+    from popstatgensim.pedigree.paths import chain_weight, proband_correction
+    # the route A -- Q -> B: sum_N_lin = 1, N_o = 1, N_mu = 1
+    spurious = (V_A * ((1 + RHO_G) / 2) ** (1 - 1)
+                * chain_weight(1, 1, RHO_Y, RHO_G)
+                * proband_correction("terminal_mating", RHO_Y, RHO_G)
+                * proband_correction("sink", RHO_Y, RHO_G))
+    correct = predicted_cov(PathSignature(1, 0, (), "source", "sink"),
+                            V_A, RHO_Y, RHO_G, phenotypic=True)
+    assert spurious > correct
+    # the inflation is (1+rho_g)/(h^2 (1+rho_y)) with h^2 = rho_g/rho_y
+    h2 = RHO_G / RHO_Y
+    assert spurious / correct == pytest.approx((1 + RHO_G) / (h2 * (1 + RHO_Y)))
