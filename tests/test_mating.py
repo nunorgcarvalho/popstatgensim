@@ -502,21 +502,35 @@ def test_per_round_product_is_the_correct_chain_target():
     the measured per-round correlations is the right target; comparing against the
     nominal square would charge that calibration difference to the coupling.
     """
-    N = 4000
-    rng = np.random.default_rng(12)
-    sex = np.zeros(N, dtype=int); sex[N // 2:] = 1; sex = rng.permutation(sex)
-    y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+    N, REPS = 4000, 15
 
-    # small round-2 pool: attenuation is visible
-    small = measure_mate_chain_correlation(
-        build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 0.3]), y)
-    assert small["round_rho_y"][1] < small["round_rho_y"][0]
-    assert small["rho_y_product"] < small["rho_y_squared"]
+    def mean_round_ratio(q2):
+        """Mean rho_y(round 2) / rho_y(round 1) over several draws.
 
-    # large round-2 pool: the two targets converge
-    large = measure_mate_chain_correlation(
-        build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, 1.0]), y)
-    assert large["rho_y_product"] == pytest.approx(large["rho_y_squared"], rel=0.02)
+        Averaged deliberately: the attenuation is a few percent while the per-draw
+        spread is larger, so a single draw says nothing about the direction.
+        """
+        ratios = []
+        for r in range(REPS):
+            rng = np.random.default_rng(500 + r)
+            np.random.seed(500 + r)
+            sex = np.zeros(N, dtype=int); sex[N // 2:] = 1
+            sex = rng.permutation(sex)
+            y = rng.normal(size=N); y = (y - y.mean()) / y.std()
+            out = measure_mate_chain_correlation(
+                build_mate_graph(N, sex, y, rho_y=0.5, q=[1.0, q2]), y)
+            ratios.append(out["round_rho_y"][1] / out["round_rho_y"][0])
+        return float(np.mean(ratios))
+
+    small_pool = mean_round_ratio(0.3)
+    large_pool = mean_round_ratio(1.0)
+
+    # attenuation is a pool-size effect: worse in the smaller round-2 pool
+    assert small_pool < large_pool
+    # and it is mild -- a few percent, not a broken mechanism
+    assert 0.90 < small_pool < 1.0
+    # with a full-size round 2 the two targets converge
+    assert large_pool == pytest.approx(1.0, abs=0.02)
 
 
 def test_chain_correlation_matches_both_targets_within_error():
